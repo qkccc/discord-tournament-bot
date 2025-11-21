@@ -1,4 +1,4 @@
-# sv_ui.py
+# cogs/shadowverse/sv_ui.py
 import discord
 from discord import ui, SelectOption, CategoryChannel, PartialEmoji
 import datetime
@@ -6,7 +6,7 @@ import asyncio
 import typing
 
 from .sv_constants import CLASS_NAMES, RESULTS, TURN_ORDERS, CLASS_EMOJI_MAP, TARGET_CATEGORY_ID
-from .sv_db import save_records_to_db, set_user_channel_setting, delete_match_record, delete_all_user_records
+from .sv_db import save_records_to_db, set_user_channel_setting, delete_match_record, delete_all_user_records, get_user_channel_setting
 from .sv_utils import get_stats_summary, get_recent_matches
 
 if typing.TYPE_CHECKING:
@@ -66,7 +66,9 @@ class ManualRecordView(ui.View):
         if action == "cancel": await interaction.response.edit_message(content="登録をキャンセルしました。", embed=None, view=None); return
         record = {"match_time": datetime.datetime.now().strftime("%Y/%m/%d %H:%M"), "my_class": self.my_class, "opponent_class": self.opponent_class, "result": self.result, "turn_order": self.turn_order}
         try:
-            await asyncio.to_thread(save_records_to_db, self.author_id, [record])
+            # 修正: 非同期関数なので直接 await
+            await save_records_to_db(self.author_id, [record])
+            
             if action == "continue":
                 self.my_class = None; self.opponent_class = None; self.result = None; self.turn_order = "不明"; self.current_selection = "my_class"
                 self.update_view()
@@ -109,7 +111,8 @@ class ChannelSelectView(ui.View):
     async def on_select_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
         selected_channel_id = int(interaction.data["values"][0])
-        set_user_channel_setting(interaction.user.id, selected_channel_id)
+        # 修正: 非同期関数なので直接 await
+        await set_user_channel_setting(interaction.user.id, selected_channel_id)
         selected_channel = interaction.guild.get_channel(selected_channel_id)
         for item in self.children: item.disabled = True
         await interaction.edit_original_response(content=f"✅ 通知チャンネルを {selected_channel.mention} に設定しました。", view=self)
@@ -157,20 +160,20 @@ class StatsOptionsView(ui.View):
     @ui.button(label="結果を表示", style=discord.ButtonStyle.success, custom_id="stats_opt_submit")
     async def submit(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
+        # 統計計算はPandas使用のため to_thread のまま
         embed = await asyncio.to_thread(get_stats_summary, interaction.user.id, self.period, self.class_name)
         await self.cog._send_result_embed_from_interaction(interaction, embed, force_public=True)
         await self.original_interaction.edit_original_response(content="結果を表示しました。", view=None)
         self.stop()
 
 class DeleteHistoryView(ui.View):
-    """直近の履歴を表示し、個別削除機能を提供するView。状態管理によって確認画面を同一View内で実現する。"""
     def __init__(self, author_id: int, records: list[dict], original_embed: discord.Embed):
         super().__init__(timeout=180.0)
         self.author_id = author_id
         self.records = records
-        self.original_embed = original_embed # 元のEmbedを保持
+        self.original_embed = original_embed
         self.selected_match_time: str | None = None
-        self._state = 'selecting'  # 'selecting' または 'confirming'
+        self._state = 'selecting'
         self._update_components()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -180,7 +183,6 @@ class DeleteHistoryView(ui.View):
         return True
 
     def _update_components(self):
-        """Viewのコンポーネントを現在の状態に基づいて再構築する。"""
         self.clear_items()
         if self._state == 'selecting':
             options = []
@@ -207,44 +209,35 @@ class DeleteHistoryView(ui.View):
             self.add_item(cancel_button)
 
     async def on_select(self, interaction: discord.Interaction):
-        """セレクトメニューで項目が選択されたときのコールバック。"""
         self.selected_match_time = interaction.data["values"][0]
         self._update_components()
         await interaction.response.edit_message(view=self)
 
     async def on_initiate_delete(self, interaction: discord.Interaction):
-        """「選択した対戦を削除」ボタンが押されたときのコールバック。確認状態に移行する。"""
         self._state = 'confirming'
         self._update_components()
-        
         confirm_embed = self.original_embed.copy()
         confirm_embed.color = discord.Color.red()
-        
         selected_record_info = next((r for r in self.records if r['match_time'] == self.selected_match_time), None)
         info_text = f"`{self.selected_match_time}`"
         if selected_record_info:
             info_text = f"`{selected_record_info['match_time']}`\n{selected_record_info['my_class']} vs {selected_record_info['opponent_class']} ({selected_record_info['result']})"
-            
         confirm_embed.description = f"**以下の対戦記録を本当に削除しますか？**\n\n{info_text}"
-        
         await interaction.response.edit_message(embed=confirm_embed, view=self)
 
     async def on_confirm_delete(self, interaction: discord.Interaction):
-        """「はい、削除します」ボタンが押されたときのコールバック。"""
         if self.selected_match_time is None:
             await interaction.response.edit_message(content="エラー: 削除対象が選択されていません。", embed=None, view=None)
             self.stop()
             return
 
-        deleted_count = await asyncio.to_thread(delete_match_record, self.author_id, self.selected_match_time)
-        
+        # 修正: 非同期関数なので直接 await
+        deleted_count = await delete_match_record(self.author_id, self.selected_match_time)
         content = f"✅ 対戦記録 (`{self.selected_match_time}`) を削除しました。" if deleted_count > 0 else "❌ 削除に失敗したか、既にデータが存在しませんでした。"
-        
         await interaction.response.edit_message(content=content, embed=None, view=None)
         self.stop()
 
     async def on_cancel_delete(self, interaction: discord.Interaction):
-        """「いいえ、キャンセル」ボタンが押されたときのコールバック。選択状態に戻る。"""
         self.selected_match_time = None
         self._state = 'selecting'
         self._update_components()
@@ -279,6 +272,7 @@ class ControlPanelView(ui.View):
             try:
                 count = int(str(count_input.value))
                 if not 1 <= count <= 25: raise ValueError
+                # 履歴取得はPandas使用のため to_thread のまま
                 embed, records = await asyncio.to_thread(get_recent_matches, modal_interaction.user.id, count)
                 if not records:
                     await modal_interaction.followup.send(embed=embed, ephemeral=True)
@@ -315,7 +309,8 @@ class ControlPanelView(ui.View):
             
             await inner_interaction.response.edit_message(content="全データを削除中です...", view=None)
             try:
-                deleted_rows = await asyncio.to_thread(delete_all_user_records, inner_interaction.user.id)
+                # 修正: 非同期関数なので直接 await
+                deleted_rows = await delete_all_user_records(inner_interaction.user.id)
                 final_message = f"✅ あなたの戦績データ **{deleted_rows}件** をすべて削除しました。" if deleted_rows > 0 else "ℹ️ あなたの戦績データは見つかりませんでした。"
                 await inner_interaction.edit_original_response(content=final_message, view=None)
             except Exception as e:
