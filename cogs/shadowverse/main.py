@@ -18,9 +18,22 @@ class ShadowverseCog(commands.Cog):
         self.model_load_task = asyncio.create_task(self._initialize_model())
         self.bot.add_view(ControlPanelView(self.bot))
 
+        # --- 右クリックメニュー（コンテキストメニュー）の定義 ---
+        # メッセージを右クリックした時に表示されるメニュー
+        self.ctx_menu_replay = app_commands.ContextMenu(
+            name="戦績画像を読み取る",
+            callback=self.replay_context_menu,
+        )
+        # Botのツリーにメニューを登録
+        self.bot.tree.add_command(self.ctx_menu_replay)
+
     async def cog_load(self):
         """Cog読み込み時に非同期でDBを初期化"""
         await async_init_database()
+
+    async def cog_unload(self):
+        """Cogがアンロードされる時にメニューを削除"""
+        self.bot.tree.remove_command(self.ctx_menu_replay.name, type=self.ctx_menu_replay.type)
 
     async def _initialize_model(self):
         """非同期でOCRモデルを読み込みます。"""
@@ -34,9 +47,7 @@ class ShadowverseCog(commands.Cog):
     async def _send_result_embed_from_interaction(self, interaction: discord.Interaction, embed: discord.Embed, force_public: bool = False):
         """
         インタラクションに応じてEmbedを送信するヘルパー関数。
-        force_publicがTrueの場合のみ、設定された通知チャンネルへの投稿を試みます。
         """
-        # 修正: 非同期関数になったので await を追加
         target_channel_id = await get_user_channel_setting(interaction.user.id)
         target_channel = self.bot.get_channel(target_channel_id) if target_channel_id else None
 
@@ -48,55 +59,39 @@ class ShadowverseCog(commands.Cog):
                 await interaction.followup.send(f"❌ 設定されたチャンネル {target_channel.mention} にメッセージを送信する権限がありません。代わりにここに表示します。", ephemeral=True)
                 await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            # DMの場合は通常メッセージ、サーバー内の場合はephemeralステータスをdeferから引き継ぐ
             await interaction.followup.send(embed=embed)
 
-    @commands.command(name="panel")
-    async def deploy_panel(self, ctx: commands.Context):
-        """コントロールパネルを設置します。"""
-        embed = discord.Embed(title="⚔️ シャドウバース 戦績管理パネル ⚔️", description="下のボタンから各機能をご利用ください。\n\n**⚠️ まずはじめに、`⚙️ 通知チャンネル設定` ボタンから結果を投稿する個人チャンネルを設定してください。**", color=discord.Color.purple())
-        await ctx.send(embed=embed, view=ControlPanelView(self.bot))
-        try:
-            await ctx.message.delete()
-        except discord.Forbidden:
-            pass
-
-    @app_commands.command(name="record", description="ボタン操作で戦績を手動で登録します。")
-    async def manual_record(self, interaction: discord.Interaction):
-        view = ManualRecordView(author_id=interaction.user.id)
-        await interaction.response.send_message(embed=view.create_embed(), view=view, ephemeral=True)
-
-    @app_commands.command(name="replay", description="Shadowverseのリプレイ画像から戦績を記録します。")
-    async def replay_record(self, interaction: discord.Interaction, image: discord.Attachment):
+    # --- 共通ロジック: 画像処理と登録 ---
+    async def _execute_replay_processing(self, interaction: discord.Interaction, attachment: discord.Attachment):
+        """スラッシュコマンドと右クリックメニューで共通して使う画像処理ロジック"""
         if self.ocr is None:
-            return await interaction.response.send_message("OCRモデル準備中です。しばらくお待ちください。", ephemeral=True)
-        
-        # DMでの利用時は通常の応答、サーバー内ではephemeralな応答に
-        is_dm = interaction.guild is None
-        await interaction.response.defer(ephemeral=not is_dm)
+            return await interaction.followup.send("OCRモデル準備中です。しばらくお待ちください。", ephemeral=True)
 
-        if not image.content_type or not image.content_type.startswith('image/'):
-            return await interaction.followup.send("画像ファイルを添付してください。")
+        if not attachment.content_type or not attachment.content_type.startswith('image/'):
+            return await interaction.followup.send("画像ファイルを添付してください。", ephemeral=True)
         
         temp_image_path = f"temp_{interaction.id}.png"
-        await image.save(temp_image_path)
+        await attachment.save(temp_image_path)
+        
         try:
-            # OCR処理などのCPUバウンドな処理はラップする
-            async def processing_task():
+            # OCR処理（重い処理）
+            # 修正点: ここを async def から def に変更 (to_threadは同期関数を受け取るため)
+            def processing_task():
                 text_data = extract_text_from_image(self.ocr, temp_image_path)
                 if not text_data: return "❌ 画像からテキストを読み取れませんでした。", None
                 all_records = parse_replay_text(text_data)
                 if not all_records: return f"❌ 画像から戦績データを解析できませんでした。", None
                 return None, all_records
 
-            error_msg, all_records = await asyncio.to_thread(processing_task) # ここは同期関数のままなのでスレッドで
+            # スレッドプールで実行して結果を待つ
+            error_msg, all_records = await asyncio.to_thread(processing_task)
             
             if error_msg:
                 embed = discord.Embed(title="リプレイ一括登録 結果", description=error_msg, color=discord.Color.red())
                 await self._send_result_embed_from_interaction(interaction, embed)
                 return
 
-            # 修正: DB保存は非同期になったので直接 await
+            # DB保存
             saved_records, duplicate_count = await save_records_to_db(interaction.user.id, all_records)
             
             parts = []
@@ -118,6 +113,47 @@ class ShadowverseCog(commands.Cog):
         finally:
             if os.path.exists(temp_image_path):
                 os.remove(temp_image_path)
+
+    # --- コマンド定義 ---
+
+    @commands.command(name="panel")
+    async def deploy_panel(self, ctx: commands.Context):
+        """コントロールパネルを設置します。"""
+        embed = discord.Embed(title="⚔️ シャドウバース 戦績管理パネル ⚔️", description="下のボタンから各機能をご利用ください。\n\n**⚠️ まずはじめに、`⚙️ 通知チャンネル設定` ボタンから結果を投稿する個人チャンネルを設定してください。**", color=discord.Color.purple())
+        await ctx.send(embed=embed, view=ControlPanelView(self.bot))
+        try:
+            await ctx.message.delete()
+        except discord.Forbidden:
+            pass
+
+    @app_commands.command(name="record", description="ボタン操作で戦績を手動で登録します。")
+    async def manual_record(self, interaction: discord.Interaction):
+        view = ManualRecordView(author_id=interaction.user.id)
+        await interaction.response.send_message(embed=view.create_embed(), view=view, ephemeral=True)
+
+    @app_commands.command(name="replay", description="Shadowverseのリプレイ画像から戦績を記録します。")
+    async def replay_record(self, interaction: discord.Interaction, image: discord.Attachment):
+        # DMでの利用時は通常の応答、サーバー内ではephemeralな応答に
+        is_dm = interaction.guild is None
+        await interaction.response.defer(ephemeral=not is_dm)
+        # 共通ロジックを呼び出す
+        await self._execute_replay_processing(interaction, image)
+
+    # --- 右クリックメニューのコールバック ---
+    async def replay_context_menu(self, interaction: discord.Interaction, message: discord.Message):
+        # メッセージに画像が含まれているか確認
+        if not message.attachments:
+            await interaction.response.send_message("❌ このメッセージには画像が添付されていません。", ephemeral=True)
+            return
+        
+        # 最初の添付ファイルを画像として処理
+        target_attachment = message.attachments[0]
+        
+        is_dm = interaction.guild is None
+        await interaction.response.defer(ephemeral=not is_dm)
+        
+        # 共通ロジックを呼び出す
+        await self._execute_replay_processing(interaction, target_attachment)
 
     @app_commands.command(name="stats", description="自分の戦績サマリーを表示します。")
     @app_commands.describe(period="集計期間", class_name="クラスを指定")
@@ -144,7 +180,6 @@ class ShadowverseCog(commands.Cog):
     async def show_history(self, interaction: discord.Interaction, count: app_commands.Range[int, 1, 25] = 5):
         await interaction.response.defer(thinking=True, ephemeral=True)
         
-        # 履歴取得（Pandas使用）は同期的なので to_thread のまま
         embed, records = await asyncio.to_thread(get_recent_matches, interaction.user.id, count)
 
         if not records:
