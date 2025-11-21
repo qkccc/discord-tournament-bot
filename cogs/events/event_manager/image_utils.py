@@ -33,7 +33,7 @@ def create_bracket_image_from_db(guild_id: int, db: DatabaseManager) -> discord.
     # ▲▲▲ 修正ここまで ▲▲▲
 
     try:
-        font = ImageFont.truetype("meiryo.ttc", font_size)
+        font = ImageFont.truetype("assets/meiryo.ttc", font_size)
     except IOError:
         font = ImageFont.load_default()
 

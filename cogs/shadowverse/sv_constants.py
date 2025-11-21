@@ -1,7 +1,7 @@
 # sv_constants.py
 import discord
 
-DB_FILE = "shadowverse_data.db"
+DB_FILE = "data/shadowverse_data.db"
 CLASS_NAMES = ["エルフ", "ロイヤル", "ウィッチ", "ドラゴン", "ナイトメア", "ビショップ", "ネメシス"]
 TURN_ORDERS = ["先攻", "後攻", "不明"]
 RESULTS = ["WIN", "LOSE"]

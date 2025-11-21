@@ -37,8 +37,8 @@ def generate_schedule_image(teams_data, matches_data, current_round: int):
     image_width = left_header_width + cell_size * num_teams + margin * 2
     image_height = top_header_height + cell_size * num_teams + margin * 2
     try:
-        font_header_base = ImageFont.truetype("meiryo.ttc", font_size_header, index=0)
-        font_cell = ImageFont.truetype("meiryo.ttc", font_size_cell, index=0)
+        font_header_base = ImageFont.truetype("assets/meiryo.ttc", font_size_header, index=0)
+        font_cell = ImageFont.truetype("assets/meiryo.ttc", font_size_cell, index=0)
     except IOError:
         log.error("フォントファイル 'meiryo.ttc' が見つかりません。")
         font_header_base = ImageFont.load_default(); font_cell = ImageFont.load_default()
@@ -54,7 +54,7 @@ def generate_schedule_image(teams_data, matches_data, current_round: int):
         current_font_size = font_size_header; temp_font = font_header_base
         while draw.textbbox((0,0), team_name_str, font=temp_font)[2] > left_header_width - 20 and current_font_size > 10:
             current_font_size -= 1
-            try: temp_font = ImageFont.truetype("meiryo.ttc", current_font_size, index=0)
+            try: temp_font = ImageFont.truetype("assets/meiryo.ttc", current_font_size, index=0)
             except IOError: temp_font = ImageFont.load_default()
         text_bbox = draw.textbbox((0,0), team_name_str, font=temp_font); text_height = text_bbox[3] - text_bbox[1]
         draw.text((margin + 10, margin + top_header_height + i * cell_size + (cell_size - text_height) / 2), team_name_str, font=temp_font, fill=(0, 0, 0))

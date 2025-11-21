@@ -7,8 +7,8 @@ from dotenv import load_dotenv
 import sqlite3
 import functools # functoolsをインポート
 
-from cogs.event_manager.database import DatabaseManager
-from cogs.event_manager.models import DummyPlayer
+from cogs.events.event_manager.database import DatabaseManager
+from cogs.events.event_manager.models import DummyPlayer
 from .rr_views import RegistrationView
 from .rr_models import RR_Team
 from . import rr_logic, rr_handlers, rr_roles
@@ -19,7 +19,7 @@ class RoundRobinCog(commands.Cog, name="RoundRobin"):
     """チーム登録制の総当たり戦を管理するCog"""
     def __init__(self, bot):
         self.bot = bot
-        self.db = DatabaseManager('tournaments.db')
+        self.db = DatabaseManager('data/tournaments.db')
         
         load_dotenv()
         try: self.rr_channel_id = int(os.getenv('RR_CHANNEL_ID', 0))

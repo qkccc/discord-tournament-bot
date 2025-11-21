@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 from typing import List, Union
 import discord
-from cogs.event_manager.models import DummyPlayer
+from cogs.events.event_manager.models import DummyPlayer
 
 @dataclass
 class RR_Team:

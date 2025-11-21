@@ -10,7 +10,7 @@ import asyncio
 import sqlite3 # データベース操作のためにインポート
 
 # --- グローバル変数・定数 ---
-DB_FILE = "deck_data.db" # 保存するデータベースファイル名
+DB_FILE = "data/deck_data.db" # 保存するデータベースファイル名
 
 # --- データベース初期化関数 ---
 def init_database():

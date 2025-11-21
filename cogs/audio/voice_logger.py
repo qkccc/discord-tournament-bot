@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- 環境変数から設定を読み込み ---
-DB_FILE = os.getenv("DB_FILE", "voice_log.db")
+DB_FILE = os.getenv("DB_FILE", "data/voice_log.db")
 
 class VoiceLoggerCog(commands.Cog):
     # JSTタイムゾーンをクラス変数として定義

@@ -4,7 +4,7 @@ from discord import app_commands
 import sqlite3
 
 # データベースファイルへのパス
-DB_NAME = 'sv_cards.db'
+DB_NAME = 'data/sv_cards.db'
 
 # --- カード管理Cogクラス ---
 class ShadowverseCardManager(commands.Cog):

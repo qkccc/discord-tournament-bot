@@ -27,18 +27,26 @@ intents.voice_states = True     # ユーザーのボイスチャンネルへの�
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# 読み込むCogsのリスト (gemini_cogとshadowverse_cogを追加)
+# 読み込むCogsのリスト
 INITIAL_EXTENSIONS = [
-    'cogs.event_manager.cog',
-    'cogs.music_cog',
-    'cogs.voice_logger_cog',
-    'cogs.gemini_cog',
-    'cogs.deck_cog',
-    'cogs.shadowverse.cog',
-    'cogs.room_match_cog',
-    'cogs.shadowverse_card_manager.cog',
-    'cogs.reaction_cog',
-    'cogs.roundrobin.cog'
+    # 🏆 イベント関連 (eventsフォルダへ移動)
+    'cogs.events.event_manager.cog',
+    'cogs.events.roundrobin.cog',
+
+    # ⚔️ Shadowverse関連 (shadowverseフォルダへ集約)
+    'cogs.shadowverse.main',         # 元 cog.py
+    'cogs.shadowverse.deck',         # 元 deck_cog.py
+    'cogs.shadowverse.panel',        # 元 shadowverse_panel_cog.py
+    'cogs.shadowverse.card_manager', # 元 shadowverse_card_manager/cog.py
+    
+    # 🎵 音声関連 (設定済み)
+    'cogs.audio.music',
+    'cogs.audio.voice_logger',
+
+    # 🛠️ 便利機能 (設定済み)
+    'cogs.utils.gemini',
+    'cogs.utils.room_match',
+    'cogs.utils.reaction',
 ]
 
 # --- 定期実行タスク ---

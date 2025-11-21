@@ -24,7 +24,7 @@ model = genai.GenerativeModel(
 MAX_HISTORY = 10 
 
 # データベースファイルのパスを定数として定義
-DB_PATH = 'gemini_history.db'
+DB_PATH = 'data/gemini_history.db'
 
 class GeminiCog(commands.Cog):
     def __init__(self, bot):

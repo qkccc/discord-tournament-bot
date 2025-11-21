@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 class EventManagerCog(commands.Cog, name="EventManager"):
     def __init__(self, bot):
         self.bot = bot
-        self.db = DatabaseManager('tournaments.db')
+        self.db = DatabaseManager('data/tournaments.db')
         self.recruit_sessions: Dict[int, dict] = {}
         self.swiss_tournaments: Dict[int, SwissTournament] = {}
         self.locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)

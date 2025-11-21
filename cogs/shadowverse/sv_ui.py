@@ -10,7 +10,7 @@ from .sv_db import save_records_to_db, set_user_channel_setting, delete_match_re
 from .sv_utils import get_stats_summary, get_recent_matches
 
 if typing.TYPE_CHECKING:
-    from .cog import ShadowverseCog
+    from .main import ShadowverseCog
 
 class ManualRecordView(ui.View):
     def __init__(self, author_id: int):

@@ -2,7 +2,7 @@ import sqlite3
 import os
 
 # データベースファイル名を指定 (ルートフォルダに作成)
-DB_NAME = 'sv_cards.db'
+DB_NAME = 'data/sv_cards.db'
 
 # 既にファイルが存在する場合は実行しない
 if os.path.exists(DB_NAME):

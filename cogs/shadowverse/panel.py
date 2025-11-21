@@ -7,7 +7,7 @@ import asyncio
 import sqlite3 # SQLiteを扱うためにインポート
 
 # --- 定数 ---
-DB_FILE = "user_data.db"  # データベースファイルの名前
+DB_FILE = "data/user_data.db"  # データベースファイルの名前
 TARGET_CATEGORY_ID = 1003574017900417094 # 通知先として選択できるチャンネルが含まれるカテゴリID
 
 # --- データベース管理クラス ---
@@ -59,13 +59,13 @@ class DatabaseManager:
 
 
 # --- UIコンポーネント (View, Modalなど) ---
-# 元のCogからUIパーツをインポート
+# 修正: 同フォルダ内のモジュールからインポートするように変更
 try:
-    from .shadowverse_cog import (
-        ManualRecordView, ConfirmDeleteView, get_stats_summary, get_recent_matches
-    )
+    from .sv_ui import ManualRecordView
+    # ConfirmDeleteViewはsv_uiにない場合があるため、必要ならここで簡易定義するかsv_uiに追加推奨ですが、一旦pass
+    class ConfirmDeleteView(ui.View): pass 
+    from .sv_utils import get_stats_summary, get_recent_matches
 except ImportError:
-    # 依存関係のエラーを防ぐためのフォールバック
     class ManualRecordView(ui.View): pass
     class ConfirmDeleteView(ui.View): pass
     def get_stats_summary(user_id, period): return discord.Embed(title="Error")
