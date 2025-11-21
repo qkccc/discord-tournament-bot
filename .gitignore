@@ -27,3 +27,6 @@ Thumbs.db
 *.ttf
 assets/meiryo.ttc
 assets/meiryob.ttc
+
+project_context.txt
+structure_clean.txt
