@@ -114,6 +114,28 @@ class DatabaseManager:
                 )
             ''')
 
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS history_tournaments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL,  -- 'swiss', 'se', 'roundrobin'
+                    end_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                    winner_name TEXT,
+                    details TEXT -- JSON形式でその他の情報を保存
+                )
+            ''')
+
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS history_rankings (
+                    tournament_id INTEGER,
+                    rank INTEGER,
+                    name TEXT,
+                    info TEXT,
+                    FOREIGN KEY(tournament_id) REFERENCES history_tournaments(id) ON DELETE CASCADE
+                )
+            ''')
+
             # --- テーブル構造の自動修復機能 (カラム追加チェック) ---
             # RR関連はテーブル名変更がないため、そのままチェック
             

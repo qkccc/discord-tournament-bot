@@ -47,6 +47,31 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         self.bot.loop.create_task(self._load_active_recruitments())
 
     # ==============================================================================
+    # 履歴保存用のヘルパーメソッド (新規追加)
+    # ==============================================================================
+    def _archive_tournament(self, guild_id: int, name: str, type_str: str, winner_name: str, rankings: List[dict]):
+        """大会データを履歴テーブルに保存する"""
+        try:
+            tourney_id = self.db.execute(
+                "INSERT INTO history_tournaments (guild_id, name, type, winner_name) VALUES (?, ?, ?, ?)",
+                (guild_id, name, type_str, winner_name),
+                return_lastrowid=True
+            )
+            
+            ranking_data = []
+            for r in rankings:
+                ranking_data.append((tourney_id, r['rank'], r['name'], r['info']))
+            
+            if ranking_data:
+                self.db.execute(
+                    "INSERT INTO history_rankings (tournament_id, rank, name, info) VALUES (?, ?, ?, ?)",
+                    ranking_data
+                )
+            log.info(f"大会 '{name}' のデータをアーカイブしました (ID: {tourney_id})")
+        except Exception as e:
+            log.error(f"大会アーカイブ中にエラー: {e}")
+
+    # ==============================================================================
     # 既存のヘルパーメソッド、リスナー、コマンド
     # ==============================================================================
 
@@ -470,8 +495,23 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             elif no_winners: msg = "全勝者がいなくなりました。これにて大会は終了です！"
             else: msg = f"規定の {tournament.max_rounds} ラウンドが終了しました！"
             
-            await main_ch.send(msg); await self._display_standings(interaction, final=True, channel=main_ch)
+            await main_ch.send(msg)
+            await self._display_standings(interaction, final=True, channel=main_ch)
             
+            # ▼▼▼ 履歴保存処理 ▼▼▼
+            ranked_players = tournament.get_ranked_players()
+            winner_name = ranked_players[0].display_name if ranked_players else "なし"
+            rankings = []
+            for i, p in enumerate(ranked_players):
+                rankings.append({
+                    "rank": i + 1,
+                    "name": p.display_name,
+                    "info": f"{p.record}, OMW: {p.omw:.2f}"
+                })
+            
+            self._archive_tournament(guild_id, "スイスドロー大会", "swiss", winner_name, rankings)
+            # ▲▲▲
+
             # 修正: テーブル名 swiss_tournaments, event_players, swiss_pairings, swiss_results
             self.db.execute("DELETE FROM swiss_tournaments WHERE guild_id = ?", (guild_id,))
             self.db.execute("DELETE FROM event_players WHERE guild_id = ?", (guild_id,))
@@ -500,7 +540,7 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         await target_channel.send(embed=embed)
         
     # ==============================================================================
-    # トーナメント機能のメソッド (変更なし)
+    # トーナメント機能のメソッド
     # ==============================================================================
     
     async def _execute_bracket(self, interaction: discord.Interaction):
@@ -626,7 +666,17 @@ class EventManagerCog(commands.Cog, name="EventManager"):
                 if not next_match:
                     winner_name = p_map.get(winner_id, '不明')
                     await main_ch.send(f"🎉 **優勝者決定！** 🎉\n**{winner_name}** さんの優勝です！おめでとうございます！")
-                    self.db.execute("UPDATE se_tournaments SET is_active = 0 WHERE guild_id = ?", (guild_id,))
+                    
+                    # ▼▼▼ 履歴保存処理 ▼▼▼
+                    rankings = [{"rank": 1, "name": winner_name, "info": "優勝"}]
+                    self._archive_tournament(guild_id, "トーナメント", "se", winner_name, rankings)
+                    # ▲▲▲
+
+                    # 修正: データを削除してクリーンにする
+                    self.db.execute("DELETE FROM se_tournaments WHERE guild_id = ?", (guild_id,))
+                    self.db.execute("DELETE FROM se_matches WHERE guild_id = ?", (guild_id,))
+                    self.db.execute("DELETE FROM event_players WHERE guild_id = ?", (guild_id,))
+                    
             except Exception as e:
                 log.error(f"勝利処理中にエラーが発生(Guild: {guild_id}, Match: {match_id}): {e}", exc_info=True)
                 await interaction.followup.send(f"エラーが発生しました。Botの管理者にご連絡ください。", ephemeral=True)

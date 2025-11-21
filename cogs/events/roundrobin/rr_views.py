@@ -47,14 +47,23 @@ class MatchResultApprovalView(discord.ui.View):
         
         await interaction.response.defer()
         
-        # 元のロジックを呼び出して結果を確定
+        # 結果確定処理
         await cog.handle_score_report(
             interaction, self.message_id, self.match_id, 
             self.team1_id, self.team2_id, 
             self.team1_score, self.team2_score
         )
         
-        # 承認メッセージを削除または更新
+        # ▼▼▼ 追加: 結果をチャンネルに通知 ▼▼▼
+        # チーム名を取得するためにDB検索が必要（ViewにはIDしか持たせていない場合）
+        # handle_score_report 内で処理するのが一番きれいだが、Viewから簡易的に通知するなら:
+        t1 = cog.db.fetchone("SELECT name FROM rr_teams WHERE team_id = ?", (self.team1_id,))
+        t2 = cog.db.fetchone("SELECT name FROM rr_teams WHERE team_id = ?", (self.team2_id,))
+        if t1 and t2:
+            from .rr_logic import report_match_result
+            await report_match_result(cog, interaction.guild.id, t1['name'], self.team1_score, self.team2_score, t2['name'])
+        # ▲▲▲ 追加ここまで ▲▲▲
+
         await interaction.followup.edit_message(message_id=interaction.message.id, content=f"✅ 結果が承認されました！", view=None)
 
     @discord.ui.button(label="却下", style=discord.ButtonStyle.danger)

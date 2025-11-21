@@ -175,21 +175,47 @@ async def send_match_schedule(cog: "RoundRobinCog", channel: discord.TextChannel
     msg = await channel.send(embed=embed, file=file)
     cog.db.execute("UPDATE rr_tournaments SET message_id = ? WHERE guild_id = ?", (msg.id, guild_id))
 
+# ▼▼▼ 新規追加: 結果報告通知用関数 ▼▼▼
+async def report_match_result(cog: "RoundRobinCog", guild_id: int, team1_name: str, score1: int, score2: int, team2_name: str):
+    """承認された試合結果をチャンネルに通知する"""
+    # 通知先チャンネルの特定: rr_channel_id設定があればそこ、なければシステムメッセージ用など
+    channel = None
+    if cog.rr_channel_id:
+        channel = cog.bot.get_channel(cog.rr_channel_id)
+    
+    if not channel:
+        # 設定がない場合は、configのパネル設置チャンネルを探す
+        config = cog.db.fetchone("SELECT panel_channel_id FROM rr_config WHERE guild_id = ?", (guild_id,))
+        if config and config['panel_channel_id']:
+            channel = cog.bot.get_channel(config['panel_channel_id'])
+
+    if channel:
+        embed = discord.Embed(title="🔥 試合結果確定", color=discord.Color.orange())
+        winner = team1_name if score1 > score2 else (team2_name if score2 > score1 else "引き分け")
+        embed.add_field(name="対戦カード", value=f"**{team1_name}** vs **{team2_name}**", inline=False)
+        embed.add_field(name="スコア", value=f"{score1} - {score2}", inline=False)
+        embed.add_field(name="勝者", value=winner, inline=False)
+        try:
+            await channel.send(embed=embed)
+        except:
+            pass # 送れなくてもエラーにはしない
+
 async def finish_tournament(cog: "RoundRobinCog", channel: discord.TextChannel):
     guild_id = channel.guild.id
     guild = channel.guild
     
-    # --- 最終結果画像の生成と送信 ---
-    teams_data = cog.db.fetchall("SELECT team_id, name FROM rr_teams WHERE guild_id = ? ORDER BY name", (guild_id,))
+    # データを取得
+    teams_data = cog.db.fetchall("SELECT team_id, name, wins, losses, score_for FROM rr_teams WHERE guild_id = ? ORDER BY name", (guild_id,))
     matches_data = cog.db.fetchall("SELECT * FROM rr_matches WHERE guild_id = ?", (guild_id,))
     tourney_info = cog.db.fetchone("SELECT current_round FROM rr_tournaments WHERE guild_id = ?", (guild_id,))
     
+    # 最終結果画像の生成と送信
     if teams_data and tourney_info:
         current_round = tourney_info['current_round']
         image_buffer = generate_schedule_image(teams_data, matches_data, current_round)
         file = discord.File(fp=image_buffer, filename="schedule_final.png")
         
-        # 最終順位の計算
+        # 順位計算ロジック
         match_results = {}
         for match in matches_data:
             if match['status'] != 'reported': continue
@@ -199,13 +225,7 @@ async def finish_tournament(cog: "RoundRobinCog", channel: discord.TextChannel):
             elif match['team2_score'] > match['team1_score']: winner_id = match['team2_id']
             match_results[key] = winner_id
 
-        teams_list = []
-        for t in teams_data:
-            # 最新の勝敗数を再取得（念のため）
-            stats = cog.db.fetchone("SELECT wins, losses, score_for FROM rr_teams WHERE team_id = ?", (t['team_id'],))
-            t_dict = dict(t)
-            t_dict.update(stats)
-            teams_list.append(t_dict)
+        teams_list = [dict(t) for t in teams_data]
 
         def compare_teams(team1, team2):
             if team1['wins'] != team2['wins']: return team2['wins'] - team1['wins']
@@ -219,38 +239,52 @@ async def finish_tournament(cog: "RoundRobinCog", channel: discord.TextChannel):
 
         sorted_teams = sorted(teams_list, key=functools.cmp_to_key(compare_teams))
         
-        # ▼▼▼ 変更点: 優勝チームのメンバー表示機能 ▼▼▼
+        # 優勝チーム情報の構築
         winner_team = sorted_teams[0]
         winner_members = cog.db.fetchall("SELECT display_name FROM rr_players WHERE team_id = ?", (winner_team['team_id'],))
         member_names = ", ".join([m['display_name'] for m in winner_members])
 
         embed = discord.Embed(title="🏆 全試合終了！ 最終結果発表 🏆", color=discord.Color.gold())
         embed.set_image(url="attachment://schedule_final.png")
-        
         embed.add_field(
             name=f"👑 優勝: {winner_team['name']}",
             value=f"**メンバー:** {member_names}\n**戦績:** {winner_team['wins']}勝 {winner_team['losses']}敗 (総得点: {winner_team['score_for']})",
             inline=False
         )
         
-        # 2位以下の表示
-        sub_standings = ""
-        for i, team in enumerate(sorted_teams[1:], start=2):
-            sub_standings += f"**{i}位**: {team['name']} ({team['wins']}勝 {team['losses']}敗)\n"
-        if sub_standings:
-            embed.add_field(name="順位表", value=sub_standings, inline=False)
+        # ▼▼▼ 履歴保存処理 ▼▼▼
+        try:
+            # history_tournaments に保存
+            tourney_id = cog.db.execute(
+                "INSERT INTO history_tournaments (guild_id, name, type, winner_name) VALUES (?, ?, ?, ?)",
+                (guild_id, "チーム総当たり戦", "roundrobin", winner_team['name']),
+                return_lastrowid=True
+            )
+            # history_rankings に保存
+            ranking_data = []
+            for i, team in enumerate(sorted_teams):
+                ranking_data.append((
+                    tourney_id, 
+                    i + 1, 
+                    team['name'], 
+                    f"{team['wins']}勝{team['losses']}敗, 得点:{team['score_for']}"
+                ))
+            if ranking_data:
+                cog.db.execute("INSERT INTO history_rankings (tournament_id, rank, name, info) VALUES (?, ?, ?, ?)", ranking_data)
+            log.info(f"総当たり戦データをアーカイブしました (ID: {tourney_id})")
+        except Exception as e:
+            log.error(f"履歴保存中にエラー: {e}")
+        # ▲▲▲ 保存ここまで ▲▲▲
 
         await channel.send(embed=embed, file=file)
-        # ▲▲▲ 変更ここまで ▲▲▲
 
-    # --- ロール削除と終了処理 ---
+    # ロール削除
     teams_with_roles = cog.db.fetchall("SELECT role_id FROM rr_teams WHERE guild_id = ? AND role_id IS NOT NULL", (guild_id,))
     for team in teams_with_roles:
         role = guild.get_role(team['role_id'])
         if role: 
             try: await role.delete(reason="総当たり戦が終了したため")
             except: pass
-            
     config = cog.db.fetchone("SELECT role_id FROM rr_config WHERE guild_id = ?", (guild_id,))
     if config and config['role_id']:
         role = guild.get_role(config['role_id'])
@@ -258,7 +292,12 @@ async def finish_tournament(cog: "RoundRobinCog", channel: discord.TextChannel):
             try: await role.delete(reason="総当たり戦が終了したため")
             except: pass
             
-    cog.db.execute("UPDATE rr_tournaments SET is_active = 0 WHERE guild_id = ?", (guild_id,))
+    # データクリーンアップ（アーカイブ済みなので削除）
+    cog.db.execute("DELETE FROM rr_tournaments WHERE guild_id = ?", (guild_id,))
+    cog.db.execute("DELETE FROM rr_matches WHERE guild_id = ?", (guild_id,))
+    cog.db.execute("DELETE FROM rr_players WHERE guild_id = ?", (guild_id,))
+    cog.db.execute("DELETE FROM rr_teams WHERE guild_id = ?", (guild_id,))
+    cog.db.execute("UPDATE rr_config SET role_id = NULL WHERE guild_id = ?", (guild_id,))
 
 async def execute_next_round(cog: "RoundRobinCog", ctx_or_interaction):
     if isinstance(ctx_or_interaction, discord.Interaction): await ctx_or_interaction.response.defer()

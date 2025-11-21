@@ -2,7 +2,7 @@
 ==================================================
 File: apeiron_bot.py
 ==================================================
-# apeiron_bot.py (修正後)
+# apeiron_bot.py
 import discord
 from discord.ext import commands, tasks
 import asyncio
@@ -11,50 +11,95 @@ import zoneinfo
 import os
 from dotenv import load_dotenv
 import logging
+import logging.handlers # 追加: ログローテーション用
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
 
-# yomitokuライブラリのロガーを直接取得し、ログの出力を完全に抑制します。
-# これにより、ライブラリ内部の特殊なログ設定に影響されずにログを非表示にします。
-yomi_logger = logging.getLogger('yomitoku')
-yomi_logger.setLevel(logging.CRITICAL + 1) # ログレベルをCRITICALより上に設定して事実上無効化
-yomi_logger.propagate = False              # 上位のロガーにログが伝播するのを防ぐ
+# --- ロギング設定 (新規追加) ---
+def setup_logging():
+    # ルートロガーの設定
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
 
-# Botの初期設定 (main.pyのより多くの権限を持つ設定を採用)
+    # フォーマット（日時 - ファイル名 - レベル - メッセージ）
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    # 1. ファイル出力設定 (bot.log)
+    # 5MBごとに新しいファイルを作成し、最大3つまでバックアップを残す
+    file_handler = logging.handlers.RotatingFileHandler(
+        filename='bot.log',
+        encoding='utf-8',
+        maxBytes=5 * 1024 * 1024,  # 5MB
+        backupCount=3
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # 2. コンソール出力設定 (画面にも表示)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+    # 外部ライブラリのログレベル調整 (うるさいログを抑制)
+    logging.getLogger('discord').setLevel(logging.WARNING)
+    logging.getLogger('httpcore').setLevel(logging.WARNING)
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+    
+    # yomitokuライブラリのログ抑制
+    yomi_logger = logging.getLogger('yomitoku')
+    yomi_logger.setLevel(logging.CRITICAL + 1)
+    yomi_logger.propagate = False
+
+# ログ設定を実行
+setup_logging()
+# -----------------------------
+
+# Botの初期設定
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.reactions = True
-intents.guilds = True # スラッシュコマンドやギルド情報に必要
-intents.voice_states = True     # ユーザーのボイスチャンネルへの接続状態を知るために必要
+intents.guilds = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# 読み込むCogsのリスト
-INITIAL_EXTENSIONS = [
-    # 🏆 イベント関連 (eventsフォルダへ移動)
-    'cogs.events.event_manager.cog',
-    'cogs.events.roundrobin.cog',
-
-    # ⚔️ Shadowverse関連 (shadowverseフォルダへ集約)
-    'cogs.shadowverse.main',         # 元 cog.py
-    'cogs.shadowverse.deck',         # 元 deck_cog.py
-    'cogs.shadowverse.panel',        # 元 shadowverse_panel_cog.py
-    'cogs.shadowverse.card_manager', # 元 shadowverse_card_manager/cog.py
+# --- Cogを自動ロードする関数 ---
+async def load_cogs():
+    """cogsフォルダ以下の拡張機能を自動的に探してロードします"""
+    cogs_dir = './cogs'
     
-    # 🎵 音声関連 (設定済み)
-    'cogs.audio.music',
-    'cogs.audio.voice_logger',
-
-    # 🛠️ 便利機能 (設定済み)
-    'cogs.utils.gemini',
-    'cogs.utils.room_match',
-    'cogs.utils.reaction',
-]
+    print("--- Cogのロードを開始します ---")
+    
+    # cogsフォルダ内を再帰的に探索 (サブフォルダも全て見る)
+    for root, dirs, files in os.walk(cogs_dir):
+        # __pycache__ などの不要なフォルダは除外
+        if '__' in root:
+            continue
+            
+        for filename in files:
+            # .pyファイルのみ対象、_で始まるファイル（__init__.pyなど）は除外
+            if filename.endswith('.py') and not filename.startswith('_'):
+                # ファイルパスを作成 (例: ./cogs/audio/music.py)
+                file_path = os.path.join(root, filename)
+                
+                # モジュールパス形式に変換 (例: cogs.audio.music)
+                module_name = os.path.relpath(file_path, '.').replace(os.sep, '.')[:-3]
+                
+                try:
+                    await bot.load_extension(module_name)
+                    print(f"✅ '{module_name}' をロードしました。")
+                except commands.NoEntryPointError:
+                    # setup関数がないファイル（ユーティリティなど）はスキップ
+                    pass 
+                except Exception as e:
+                    print(f"⚠️ '{module_name}' のロードに失敗しました: {e}")
+    
+    print("--- ロード完了 ---")
 
 # --- 定期実行タスク ---
-TARGET_CHANNEL_ID = 941626417345593345 # チャンネルID
+TARGET_CHANNEL_ID = 941626417345593345
 JST = zoneinfo.ZoneInfo("Asia/Tokyo")
 TARGET_TIME = datetime.time(hour=22, minute=0, tzinfo=JST)
 
@@ -68,181 +113,41 @@ async def send_regular_announcement():
 # --- カスタムヘルプコマンド ---
 @bot.command(name='ヘルプ', aliases=['help'])
 async def custom_help(ctx):
-    embed = discord.Embed(
-        title="🏆 Botコマンド一覧",
-        description="このBotで利用できるコマンドの一覧です。",
-        color=0x00aaff
-    )
-    embed.add_field(
-        name="⚔️ 大会・チーム分け機能",
-        value=(
-            "**`!募集`** : イベント参加者の募集を開始します。\n"
-            "参加者は👍リアクションで参加し、表示されるボタンでイベント（スイスドロー、トーナメント、チーム分け）を開始・操作します。\n"
-            "**詳しくは `!ヘルプ3` を参照してください。**"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="その他",
-        value=(
-            "**`!ヘルプ`** : このヘルプメッセージを表示します。\n"
-            "**`!ヘルプ2`** : 音楽機能のヘルプメッセージを表示します。\n"
-            "**`!ヘルプ3`** : 大会・チーム分け機能の詳細なヘルプを表示します。\n"
-            "**`!ヘルプ4`** : Shadowverse戦績管理機能のヘルプを表示します。\n"
-            "**`!ヘルプ5`** : チーム総当たり戦機能のヘルプを表示します。\n"
-            "**`@Bot名 [メッセージ]`**: Botと会話します（Gemini）"
-        ),
-        inline=False
-    )
+    embed = discord.Embed(title="🏆 Botコマンド一覧", description="このBotで利用できるコマンドの一覧です。", color=0x00aaff)
+    embed.add_field(name="⚔️ 大会・チーム分け機能", value="**`!募集`** : イベント参加者の募集を開始します。\n参加者は👍リアクションで参加し、ボタンでイベントを開始・操作します。\n**詳しくは `!ヘルプ3` を参照してください。**", inline=False)
+    embed.add_field(name="その他", value="**`!ヘルプ`** : このヘルプメッセージを表示します。\n**`!ヘルプ2`** : 音楽機能のヘルプを表示します。\n**`!ヘルプ3`** : 大会・チーム分け機能の詳細ヘルプを表示します。\n**`!ヘルプ4`** : Shadowverse戦績管理機能のヘルプを表示します。\n**`!ヘルプ5`** : チーム総当たり戦機能のヘルプを表示します。\n**`@Bot名 [メッセージ]`**: Botと会話します（Gemini）", inline=False)
     embed.set_footer(text="Shadowverse関連のコマンドはスラッシュ(/)で入力します。")
     await ctx.send(embed=embed)
 
 @bot.command(name='ヘルプ2')
 async def help2(ctx):
-    """音楽機能のヘルプメッセージを表示します。"""
-    embed = discord.Embed(
-        title="🎵 音楽機能コマンド一覧",
-        description="YouTubeの音楽を再生するためのコマンドです。",
-        color=0x3498db
-    )
-    embed.add_field(
-        name="基本操作",
-        value=(
-            "**`!通話`**: Botをボイスチャンネルに呼び出します。\n"
-            "**`!再生 [曲名 or URL]`**: 曲を検索して再生リストに追加します。\n"
-            "**`!退出`**: Botをボイスチャンネルから退出させます。"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="再生コントロール",
-        value=(
-            "**`!一時停止`**: 再生を一時停止します。\n"
-            "**`!再開`**: 再生を再開します。\n"
-            "**`!スキップ`**: 現在の曲をスキップします。\n"
-            "**`!停止`**: 再生を完全に停止し、再生リストを空にします。"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="再生リスト管理",
-        value=(
-            "**`!一覧`**: 現在の再生リストを表示します。"
-        ),
-        inline=False
-    )
-    embed.set_footer(text="ボイスチャンネルに参加してからコマンドを使用してください。")
+    embed = discord.Embed(title="🎵 音楽機能コマンド一覧", description="YouTubeの音楽を再生するためのコマンドです。", color=0x3498db)
+    embed.add_field(name="基本操作", value="**`!通話`**: Botをボイスチャンネルに呼び出します。\n**`!再生 [曲名 or URL]`**: 曲を検索して再生リストに追加します。\n**`!退出`**: Botをボイスチャンネルから退出させます。", inline=False)
+    embed.add_field(name="再生コントロール", value="**`!一時停止`**, **`!再開`**, **`!スキップ`**, **`!停止`**", inline=False)
+    embed.add_field(name="再生リスト管理", value="**`!一覧`**: 現在の再生リストを表示します。", inline=False)
     await ctx.send(embed=embed)
-
 
 @bot.command(name='ヘルプ4')
 async def help4(ctx):
-    """Shadowverse戦績管理機能のヘルプメッセージを表示します。"""
-    embed = discord.Embed(
-        title="⚔️ Shadowverse戦績管理ヘルプ",
-        description="戦績管理機能で利用できるコマンドやボタン操作の一覧です。",
-        color=discord.Color.purple()
-    )
-    embed.add_field(
-        name="【推奨】パネルからの操作",
-        value=(
-            "指定されたチャンネルにあるパネルのボタンから、直感的にほとんどの機能を利用できます。\n"
-            "・**手動登録**: ボタン操作で1戦ずつ戦績を記録します。\n"
-            "・**戦績表示**: 期間とクラスを指定して、詳細な戦績サマリーを表示します。\n"
-            "・**直近履歴**: 記録した最新の対戦履歴を表示します。\n"
-            "・**通知チャンネル設定**: 戦績の表示先チャンネルを設定・変更します。\n"
-            "・**全データ削除**: あなたの全データを削除します（要確認）。"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="スラッシュコマンドでの操作",
-        value=(
-            "パネル操作に加えて、以下のスラッシュコマンドも利用可能です。\n"
-            "・**/replay [image]**: リプレイのスクリーンショットから戦績を一括登録します。\n"
-            "・**/record**: ボタン操作と同じ手動登録を開始します。\n"
-            "・**/stats [period] [class_name]**: 期間とクラスを指定して戦績サマリーを表示します。\n"
-            "・**/history [count]**: 直近の対戦履歴を指定した件数表示します。"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="テキストコマンド",
-        value=(
-            "**`!panel`**: 管理用の操作パネルを再設置する際に使用します。"
-        ),
-        inline=False
-    )
+    embed = discord.Embed(title="⚔️ Shadowverse戦績管理ヘルプ", description="戦績管理機能で利用できるコマンドやボタン操作の一覧です。", color=discord.Color.purple())
+    embed.add_field(name="【推奨】パネルからの操作", value="指定されたチャンネルにあるパネルのボタンから、直感的にほとんどの機能を利用できます。\n・**手動登録**: 1戦ずつ戦績を記録します。\n・**戦績表示**: 戦績サマリーを表示します。\n・**直近履歴**: 最新の対戦履歴を表示します。\n・**通知チャンネル設定**: 表示先チャンネルを変更します。\n・**全データ削除**: データを削除します。", inline=False)
+    embed.add_field(name="スラッシュコマンド", value="・**/replay [image]**: リプレイ画像から一括登録します。\n・**/record**, **/stats**, **/history** も利用可能です。", inline=False)
+    embed.add_field(name="テキストコマンド", value="**`!panel`**: 操作パネルを再設置します。", inline=False)
     await ctx.send(embed=embed)
 
-# ▼▼▼ 修正: ヘルプ5の内容を更新 ▼▼▼
 @bot.command(name='ヘルプ5')
 async def help5(ctx):
-    """チーム総当たり戦機能のヘルプメッセージを表示します。"""
-    embed = discord.Embed(
-        title="⚔️ チーム総当たり戦 ヘルプ",
-        description="チームを組んで総当たり戦を行うための機能です。",
-        color=discord.Color.blue()
-    )
-    embed.add_field(
-        name="【基本】パネルからの操作",
-        value=(
-            "大会管理者が `!総当たりパネル` で設置したパネルから、ボタン操作で直感的に参加できます。\n"
-            "・**チーム作成**: 新しいチームを作り、自分がリーダーになります。\n"
-            "・**チームに参加**: 既存のチームにメンバーとして参加します。\n"
-            "・**チームから脱退**: 所属しているチームから抜けます。"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="コマンドでのチーム管理",
-        value=(
-            "**`!チーム登録 [チーム名] [メンバー1] [メンバー2] ...`**: チームとメンバーを一括で登録します。\n"
-            "**`!チームメンバー追加 [チーム名] [メンバー]`**: 既存のチームにメンバーを追加します。\n"
-            "**`!チーム取消 [チーム名]`**: チームを削除します。"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="大会の進行",
-        value=(
-            "**`!総当たり開始`**: 全チームの登録完了後、大会を開始します。\n"
-            "**`!次節`**: 現在の節の全試合が終了した後、次の節に進みます。\n"
-            "**`!順位`**: 現在の順位表を表示します。\n"
-            "**`!総当たり中止`**: (管理者用) 大会全体をリセットし、作成されたロールも全て削除します。"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="試合結果の報告",
-        value=(
-            "大会が始まると、各試合の対戦カードが表示されます。\n"
-            "試合終了後、代表者がカードの「**結果報告**」ボタンを押してスコアを入力してください。\n"
-            "入力ミスがあった場合は「**結果を訂正**」ボタンから修正できます。"
-        ),
-        inline=False
-    )
+    embed = discord.Embed(title="⚔️ チーム総当たり戦 ヘルプ", description="チームを組んで総当たり戦を行うための機能です。", color=discord.Color.blue())
+    embed.add_field(name="【基本】パネルからの操作", value="管理者が `!総当たりパネル` で設置したパネルから操作します。\n・**チーム作成**: チームを作りリーダーになります。\n・**チームに参加/脱退**: チームへの出入りを行います。", inline=False)
+    embed.add_field(name="コマンド管理", value="**`!チーム登録`**, **`!チームメンバー追加`**, **`!チーム取消`**", inline=False)
+    embed.add_field(name="大会進行", value="**`!総当たり開始`**, **`!次節`**, **`!順位`**, **`!総当たり中止`**", inline=False)
     await ctx.send(embed=embed)
-# ▲▲▲ 修正ここまで ▲▲▲
 
 # --- Botのメイン処理 ---
-
-# Cogをロードする非同期関数
-async def load_cogs():
-    for extension in INITIAL_EXTENSIONS:
-        try:
-            await bot.load_extension(extension)
-            print(f"'{extension}' をロードしました。")
-        except Exception as e:
-            print(f"'{extension}' のロードに失敗しました: {e}")
-
 @bot.event
 async def on_ready():
-    """Botの起動時に実行されるイベント"""
     print(f'{bot.user} (ID: {bot.user.id}) としてログインしました')
-    # 定期実行タスクを開始
     send_regular_announcement.start()
-    # スラッシュコマンドを同期
     try:
         synced = await bot.tree.sync()
         print(f"{len(synced)}個のスラッシュコマンドを同期しました")
@@ -253,18 +158,12 @@ async def on_ready():
 @bot.command()
 @commands.is_owner()
 async def sync(ctx: commands.Context):
-    """(Botオーナー専用) スラッシュコマンドを手動で同期します"""
     try:
         synced = await bot.tree.sync()
-        message = f"✅ {len(synced)}個のスラッシュコマンドをグローバルに同期しました。"
-        print(message)
-        await ctx.send(message)
+        await ctx.send(f"✅ {len(synced)}個のスラッシュコマンドを同期しました。")
     except Exception as e:
-        message = f"❌ 同期に失敗しました: {e}"
-        print(message)
-        await ctx.send(message)
+        await ctx.send(f"❌ 同期に失敗しました: {e}")
 
-# Botの実行
 async def main():
     async with bot:
         await load_cogs()
@@ -279,7 +178,6 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Botを終了します。")
-
 
 ==================================================
 File: merge_files.py
@@ -1076,6 +974,31 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         self.bot.loop.create_task(self._load_active_recruitments())
 
     # ==============================================================================
+    # 履歴保存用のヘルパーメソッド (新規追加)
+    # ==============================================================================
+    def _archive_tournament(self, guild_id: int, name: str, type_str: str, winner_name: str, rankings: List[dict]):
+        """大会データを履歴テーブルに保存する"""
+        try:
+            tourney_id = self.db.execute(
+                "INSERT INTO history_tournaments (guild_id, name, type, winner_name) VALUES (?, ?, ?, ?)",
+                (guild_id, name, type_str, winner_name),
+                return_lastrowid=True
+            )
+            
+            ranking_data = []
+            for r in rankings:
+                ranking_data.append((tourney_id, r['rank'], r['name'], r['info']))
+            
+            if ranking_data:
+                self.db.execute(
+                    "INSERT INTO history_rankings (tournament_id, rank, name, info) VALUES (?, ?, ?, ?)",
+                    ranking_data
+                )
+            log.info(f"大会 '{name}' のデータをアーカイブしました (ID: {tourney_id})")
+        except Exception as e:
+            log.error(f"大会アーカイブ中にエラー: {e}")
+
+    # ==============================================================================
     # 既存のヘルパーメソッド、リスナー、コマンド
     # ==============================================================================
 
@@ -1499,8 +1422,23 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             elif no_winners: msg = "全勝者がいなくなりました。これにて大会は終了です！"
             else: msg = f"規定の {tournament.max_rounds} ラウンドが終了しました！"
             
-            await main_ch.send(msg); await self._display_standings(interaction, final=True, channel=main_ch)
+            await main_ch.send(msg)
+            await self._display_standings(interaction, final=True, channel=main_ch)
             
+            # ▼▼▼ 履歴保存処理 ▼▼▼
+            ranked_players = tournament.get_ranked_players()
+            winner_name = ranked_players[0].display_name if ranked_players else "なし"
+            rankings = []
+            for i, p in enumerate(ranked_players):
+                rankings.append({
+                    "rank": i + 1,
+                    "name": p.display_name,
+                    "info": f"{p.record}, OMW: {p.omw:.2f}"
+                })
+            
+            self._archive_tournament(guild_id, "スイスドロー大会", "swiss", winner_name, rankings)
+            # ▲▲▲
+
             # 修正: テーブル名 swiss_tournaments, event_players, swiss_pairings, swiss_results
             self.db.execute("DELETE FROM swiss_tournaments WHERE guild_id = ?", (guild_id,))
             self.db.execute("DELETE FROM event_players WHERE guild_id = ?", (guild_id,))
@@ -1529,7 +1467,7 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         await target_channel.send(embed=embed)
         
     # ==============================================================================
-    # トーナメント機能のメソッド (変更なし)
+    # トーナメント機能のメソッド
     # ==============================================================================
     
     async def _execute_bracket(self, interaction: discord.Interaction):
@@ -1655,7 +1593,17 @@ class EventManagerCog(commands.Cog, name="EventManager"):
                 if not next_match:
                     winner_name = p_map.get(winner_id, '不明')
                     await main_ch.send(f"🎉 **優勝者決定！** 🎉\n**{winner_name}** さんの優勝です！おめでとうございます！")
-                    self.db.execute("UPDATE se_tournaments SET is_active = 0 WHERE guild_id = ?", (guild_id,))
+                    
+                    # ▼▼▼ 履歴保存処理 ▼▼▼
+                    rankings = [{"rank": 1, "name": winner_name, "info": "優勝"}]
+                    self._archive_tournament(guild_id, "トーナメント", "se", winner_name, rankings)
+                    # ▲▲▲
+
+                    # 修正: データを削除してクリーンにする
+                    self.db.execute("DELETE FROM se_tournaments WHERE guild_id = ?", (guild_id,))
+                    self.db.execute("DELETE FROM se_matches WHERE guild_id = ?", (guild_id,))
+                    self.db.execute("DELETE FROM event_players WHERE guild_id = ?", (guild_id,))
+                    
             except Exception as e:
                 log.error(f"勝利処理中にエラーが発生(Guild: {guild_id}, Match: {match_id}): {e}", exc_info=True)
                 await interaction.followup.send(f"エラーが発生しました。Botの管理者にご連絡ください。", ephemeral=True)
@@ -1812,6 +1760,28 @@ class DatabaseManager:
                     role_id INTEGER,
                     panel_message_id INTEGER,
                     panel_channel_id INTEGER
+                )
+            ''')
+
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS history_tournaments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL,  -- 'swiss', 'se', 'roundrobin'
+                    end_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                    winner_name TEXT,
+                    details TEXT -- JSON形式でその他の情報を保存
+                )
+            ''')
+
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS history_rankings (
+                    tournament_id INTEGER,
+                    rank INTEGER,
+                    name TEXT,
+                    info TEXT,
+                    FOREIGN KEY(tournament_id) REFERENCES history_tournaments(id) ON DELETE CASCADE
                 )
             ''')
 
@@ -2944,30 +2914,129 @@ async def send_match_schedule(cog: "RoundRobinCog", channel: discord.TextChannel
     msg = await channel.send(embed=embed, file=file)
     cog.db.execute("UPDATE rr_tournaments SET message_id = ? WHERE guild_id = ?", (msg.id, guild_id))
 
+# ▼▼▼ 新規追加: 結果報告通知用関数 ▼▼▼
+async def report_match_result(cog: "RoundRobinCog", guild_id: int, team1_name: str, score1: int, score2: int, team2_name: str):
+    """承認された試合結果をチャンネルに通知する"""
+    # 通知先チャンネルの特定: rr_channel_id設定があればそこ、なければシステムメッセージ用など
+    channel = None
+    if cog.rr_channel_id:
+        channel = cog.bot.get_channel(cog.rr_channel_id)
+    
+    if not channel:
+        # 設定がない場合は、configのパネル設置チャンネルを探す
+        config = cog.db.fetchone("SELECT panel_channel_id FROM rr_config WHERE guild_id = ?", (guild_id,))
+        if config and config['panel_channel_id']:
+            channel = cog.bot.get_channel(config['panel_channel_id'])
+
+    if channel:
+        embed = discord.Embed(title="🔥 試合結果確定", color=discord.Color.orange())
+        winner = team1_name if score1 > score2 else (team2_name if score2 > score1 else "引き分け")
+        embed.add_field(name="対戦カード", value=f"**{team1_name}** vs **{team2_name}**", inline=False)
+        embed.add_field(name="スコア", value=f"{score1} - {score2}", inline=False)
+        embed.add_field(name="勝者", value=winner, inline=False)
+        try:
+            await channel.send(embed=embed)
+        except:
+            pass # 送れなくてもエラーにはしない
+
 async def finish_tournament(cog: "RoundRobinCog", channel: discord.TextChannel):
     guild_id = channel.guild.id
     guild = channel.guild
-    await channel.send("🎉 全ての試合が終了しました！最終結果を発表します！ 🎉")
-    teams_data = cog.db.fetchall("SELECT team_id, name FROM rr_teams WHERE guild_id = ? ORDER BY name", (guild_id,))
+    
+    # データを取得
+    teams_data = cog.db.fetchall("SELECT team_id, name, wins, losses, score_for FROM rr_teams WHERE guild_id = ? ORDER BY name", (guild_id,))
     matches_data = cog.db.fetchall("SELECT * FROM rr_matches WHERE guild_id = ?", (guild_id,))
     tourney_info = cog.db.fetchone("SELECT current_round FROM rr_tournaments WHERE guild_id = ?", (guild_id,))
+    
+    # 最終結果画像の生成と送信
     if teams_data and tourney_info:
         current_round = tourney_info['current_round']
         image_buffer = generate_schedule_image(teams_data, matches_data, current_round)
         file = discord.File(fp=image_buffer, filename="schedule_final.png")
-        embed = discord.Embed(title="最終対戦結果", color=discord.Color.dark_teal())
+        
+        # 順位計算ロジック
+        match_results = {}
+        for match in matches_data:
+            if match['status'] != 'reported': continue
+            key = tuple(sorted((match['team1_id'], match['team2_id'])))
+            winner_id = None
+            if match['team1_score'] > match['team2_score']: winner_id = match['team1_id']
+            elif match['team2_score'] > match['team1_score']: winner_id = match['team2_id']
+            match_results[key] = winner_id
+
+        teams_list = [dict(t) for t in teams_data]
+
+        def compare_teams(team1, team2):
+            if team1['wins'] != team2['wins']: return team2['wins'] - team1['wins']
+            if team1['score_for'] != team2['score_for']: return team2['score_for'] - team1['score_for']
+            key = tuple(sorted((team1['team_id'], team2['team_id'])))
+            if key in match_results:
+                winner_id = match_results[key]
+                if winner_id == team1['team_id']: return -1
+                if winner_id == team2['team_id']: return 1
+            return 0
+
+        sorted_teams = sorted(teams_list, key=functools.cmp_to_key(compare_teams))
+        
+        # 優勝チーム情報の構築
+        winner_team = sorted_teams[0]
+        winner_members = cog.db.fetchall("SELECT display_name FROM rr_players WHERE team_id = ?", (winner_team['team_id'],))
+        member_names = ", ".join([m['display_name'] for m in winner_members])
+
+        embed = discord.Embed(title="🏆 全試合終了！ 最終結果発表 🏆", color=discord.Color.gold())
         embed.set_image(url="attachment://schedule_final.png")
+        embed.add_field(
+            name=f"👑 優勝: {winner_team['name']}",
+            value=f"**メンバー:** {member_names}\n**戦績:** {winner_team['wins']}勝 {winner_team['losses']}敗 (総得点: {winner_team['score_for']})",
+            inline=False
+        )
+        
+        # ▼▼▼ 履歴保存処理 ▼▼▼
+        try:
+            # history_tournaments に保存
+            tourney_id = cog.db.execute(
+                "INSERT INTO history_tournaments (guild_id, name, type, winner_name) VALUES (?, ?, ?, ?)",
+                (guild_id, "チーム総当たり戦", "roundrobin", winner_team['name']),
+                return_lastrowid=True
+            )
+            # history_rankings に保存
+            ranking_data = []
+            for i, team in enumerate(sorted_teams):
+                ranking_data.append((
+                    tourney_id, 
+                    i + 1, 
+                    team['name'], 
+                    f"{team['wins']}勝{team['losses']}敗, 得点:{team['score_for']}"
+                ))
+            if ranking_data:
+                cog.db.execute("INSERT INTO history_rankings (tournament_id, rank, name, info) VALUES (?, ?, ?, ?)", ranking_data)
+            log.info(f"総当たり戦データをアーカイブしました (ID: {tourney_id})")
+        except Exception as e:
+            log.error(f"履歴保存中にエラー: {e}")
+        # ▲▲▲ 保存ここまで ▲▲▲
+
         await channel.send(embed=embed, file=file)
-    await display_standings(cog, channel)
+
+    # ロール削除
     teams_with_roles = cog.db.fetchall("SELECT role_id FROM rr_teams WHERE guild_id = ? AND role_id IS NOT NULL", (guild_id,))
     for team in teams_with_roles:
         role = guild.get_role(team['role_id'])
-        if role: await role.delete(reason="総当たり戦が終了したため")
+        if role: 
+            try: await role.delete(reason="総当たり戦が終了したため")
+            except: pass
     config = cog.db.fetchone("SELECT role_id FROM rr_config WHERE guild_id = ?", (guild_id,))
     if config and config['role_id']:
         role = guild.get_role(config['role_id'])
-        if role: await role.delete(reason="総当たり戦が終了したため")
-    cog.db.execute("UPDATE rr_tournaments SET is_active = 0 WHERE guild_id = ?", (guild_id,))
+        if role: 
+            try: await role.delete(reason="総当たり戦が終了したため")
+            except: pass
+            
+    # データクリーンアップ（アーカイブ済みなので削除）
+    cog.db.execute("DELETE FROM rr_tournaments WHERE guild_id = ?", (guild_id,))
+    cog.db.execute("DELETE FROM rr_matches WHERE guild_id = ?", (guild_id,))
+    cog.db.execute("DELETE FROM rr_players WHERE guild_id = ?", (guild_id,))
+    cog.db.execute("DELETE FROM rr_teams WHERE guild_id = ?", (guild_id,))
+    cog.db.execute("UPDATE rr_config SET role_id = NULL WHERE guild_id = ?", (guild_id,))
 
 async def execute_next_round(cog: "RoundRobinCog", ctx_or_interaction):
     if isinstance(ctx_or_interaction, discord.Interaction): await ctx_or_interaction.response.defer()
@@ -3145,6 +3214,76 @@ import logging
 
 log = logging.getLogger(__name__)
 
+# ▼▼▼ 新規追加: 結果承認用のView ▼▼▼
+class MatchResultApprovalView(discord.ui.View):
+    """対戦結果の承認を行うView"""
+    def __init__(self, message_id, match_id, team1_id, team2_id, team1_score, team2_score, reporter_team_id):
+        super().__init__(timeout=None) # 永続化せずとも、Bot再起動で消えても再報告すれば良い運用とする
+        self.message_id = message_id
+        self.match_id = match_id
+        self.team1_id = team1_id
+        self.team2_id = team2_id
+        self.team1_score = team1_score
+        self.team2_score = team2_score
+        self.reporter_team_id = reporter_team_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """ボタンを押せる人を制限する（対戦相手チーム or 管理者）"""
+        cog = interaction.client.get_cog("RoundRobin")
+        if not cog: return False
+
+        # 報告者がTeam1なら、承認者はTeam2（逆も然り）
+        opponent_team_id = self.team2_id if self.reporter_team_id == self.team1_id else self.team1_id
+        
+        # ユーザーが対戦相手チームに所属しているか確認
+        is_opponent = cog.db.fetchone(
+            "SELECT 1 FROM rr_players WHERE guild_id = ? AND user_id = ? AND team_id = ?", 
+            (interaction.guild.id, interaction.user.id, opponent_team_id)
+        )
+        
+        # 管理者権限があればOK
+        is_admin = interaction.user.guild_permissions.manage_guild
+
+        if is_opponent or is_admin:
+            return True
+        else:
+            await interaction.response.send_message("❌ 対戦相手チームのメンバーのみが承認・却下できます。", ephemeral=True)
+            return False
+
+    @discord.ui.button(label="承認", style=discord.ButtonStyle.success)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = interaction.client.get_cog("RoundRobin")
+        if not cog: return
+        
+        await interaction.response.defer()
+        
+        # 結果確定処理
+        await cog.handle_score_report(
+            interaction, self.message_id, self.match_id, 
+            self.team1_id, self.team2_id, 
+            self.team1_score, self.team2_score
+        )
+        
+        # ▼▼▼ 追加: 結果をチャンネルに通知 ▼▼▼
+        # チーム名を取得するためにDB検索が必要（ViewにはIDしか持たせていない場合）
+        # handle_score_report 内で処理するのが一番きれいだが、Viewから簡易的に通知するなら:
+        t1 = cog.db.fetchone("SELECT name FROM rr_teams WHERE team_id = ?", (self.team1_id,))
+        t2 = cog.db.fetchone("SELECT name FROM rr_teams WHERE team_id = ?", (self.team2_id,))
+        if t1 and t2:
+            from .rr_logic import report_match_result
+            await report_match_result(cog, interaction.guild.id, t1['name'], self.team1_score, self.team2_score, t2['name'])
+        # ▲▲▲ 追加ここまで ▲▲▲
+
+        await interaction.followup.edit_message(message_id=interaction.message.id, content=f"✅ 結果が承認されました！", view=None)
+
+    @discord.ui.button(label="却下", style=discord.ButtonStyle.danger)
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("結果報告を却下しました。入力内容を確認して、再度報告してください。", ephemeral=True)
+        # 承認メッセージを削除
+        await interaction.message.delete()
+# ▲▲▲ 新規追加ここまで ▲▲▲
+
+
 class ScoreReportModal(discord.ui.Modal, title='対戦結果報告'):
     def __init__(self, message_id: int, match_id: int, team1_id: int, team2_id: int, team1_name: str, team2_name: str):
         super().__init__()
@@ -3152,21 +3291,49 @@ class ScoreReportModal(discord.ui.Modal, title='対戦結果報告'):
         self.match_id = match_id
         self.team1_id = team1_id
         self.team2_id = team2_id
+        self.team1_name = team1_name
+        self.team2_name = team2_name
         self.add_item(discord.ui.TextInput(label=f"{team1_name} の勝利数", placeholder="例: 3", required=True))
         self.add_item(discord.ui.TextInput(label=f"{team2_name} の勝利数", placeholder="例: 0", required=True))
 
     async def on_submit(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("RoundRobin")
         if not cog: return await interaction.response.send_message("エラー: 機能がロードされていません。", ephemeral=True)
+        
         try:
-            team1_score = int(self.children[0].value)
-            team2_score = int(self.children[1].value)
-            if team1_score < 0 or team2_score < 0: raise ValueError()
+            t1_score = int(self.children[0].value)
+            t2_score = int(self.children[1].value)
+            if t1_score < 0 or t2_score < 0: raise ValueError()
         except (ValueError, TypeError):
             return await interaction.response.send_message("勝利数は0以上の半角数字で入力してください。", ephemeral=True)
         
-        await interaction.response.defer(ephemeral=True)
-        await cog.handle_score_report(interaction, self.message_id, self.match_id, self.team1_id, self.team2_id, team1_score, team2_score)
+        # 報告者のチームIDを取得
+        reporter_team = cog.db.fetchone(
+            "SELECT team_id FROM rr_players WHERE guild_id = ? AND user_id = ?", 
+            (interaction.guild.id, interaction.user.id)
+        )
+        
+        # 報告者がどちらのチームにも属していない場合（管理者など）は、承認スキップまたはTeam1扱いにするなど
+        # ここでは便宜上、報告者が属するチームIDを渡すが、部外者の場合はTeam1扱いとして承認フローに乗せる
+        reporter_team_id = reporter_team['team_id'] if reporter_team else self.team1_id
+
+        # ▼▼▼ 変更点: いきなり保存せず、承認Viewを表示する ▼▼▼
+        embed = discord.Embed(title="対戦結果の承認待ち", description="以下の結果が報告されました。対戦相手は内容を確認して承認してください。", color=discord.Color.orange())
+        embed.add_field(name=self.team1_name, value=str(t1_score), inline=True)
+        embed.add_field(name=self.team2_name, value=str(t2_score), inline=True)
+        embed.set_footer(text="承認されると結果が確定します。")
+
+        view = MatchResultApprovalView(
+            self.message_id, self.match_id, 
+            self.team1_id, self.team2_id, 
+            t1_score, t2_score, 
+            reporter_team_id
+        )
+        
+        # 報告者にはEphemeralで見せない（全員に見えるようにして、相手チームにメンションを送るのがベストだが、今回はチャンネル送信）
+        await interaction.response.send_message(embed=embed, view=view)
+        # ▲▲▲ 変更ここまで ▲▲▲
+
 
 class ReportResultView(discord.ui.View):
     def __init__(self):
@@ -3180,11 +3347,23 @@ class ReportResultView(discord.ui.View):
             query = "SELECT m.match_id, m.team1_id, m.team2_id, t1.name as team1_name, t2.name as team2_name FROM rr_matches m JOIN rr_teams t1 ON m.team1_id = t1.team_id JOIN rr_teams t2 ON m.team2_id = t2.team_id WHERE m.message_id = ?"
             match_data = cog.db.fetchone(query, (interaction.message.id,))
             if not match_data: return await interaction.response.send_message("エラー: 対戦カード情報が見つかりません。", ephemeral=True)
-            modal = ScoreReportModal(interaction.message.id, match_data['match_id'], match_data['team1_id'], match_data['team2_id'], match_data['team1_name'], match_data['team2_name'])
+            
+            # 修正: Modalの引数が増えたため修正
+            modal = ScoreReportModal(
+                interaction.message.id, 
+                match_data['match_id'], 
+                match_data['team1_id'], 
+                match_data['team2_id'], 
+                match_data['team1_name'], 
+                match_data['team2_name']
+            )
             await interaction.response.send_modal(modal)
         except Exception as e:
             log.error(f"[RR] 結果報告ボタン処理中にエラー: {e}", exc_info=True)
             if not interaction.response.is_done(): await interaction.response.send_message("エラーが発生しました。", ephemeral=True)
+
+# ... (CorrectResultView, NextRoundViewRR, CreateTeamModal, TeamSelect, TeamSelectView, RegistrationView は変更なし) ...
+# 以下、既存コードをそのままコピーしてください
 
 class CorrectResultView(discord.ui.View):
     def __init__(self):
@@ -3198,7 +3377,15 @@ class CorrectResultView(discord.ui.View):
             query = "SELECT m.match_id, m.team1_id, m.team2_id, t1.name as team1_name, t2.name as team2_name FROM rr_matches m JOIN rr_teams t1 ON m.team1_id = t1.team_id JOIN rr_teams t2 ON m.team2_id = t2.team_id WHERE m.message_id = ?"
             match_data = cog.db.fetchone(query, (interaction.message.id,))
             if not match_data: return await interaction.response.send_message("エラー: 対戦カード情報が見つかりません。", ephemeral=True)
-            modal = ScoreReportModal(interaction.message.id, match_data['match_id'], match_data['team1_id'], match_data['team2_id'], match_data['team1_name'], match_data['team2_name'])
+            # 訂正時もモーダル経由で承認フローへ（誤報告防止のため）
+            modal = ScoreReportModal(
+                interaction.message.id, 
+                match_data['match_id'], 
+                match_data['team1_id'], 
+                match_data['team2_id'], 
+                match_data['team1_name'], 
+                match_data['team2_name']
+            )
             await interaction.response.send_modal(modal)
         except Exception as e:
             log.error(f"[RR] 結果訂正ボタン処理中にエラー: {e}", exc_info=True)
@@ -3218,79 +3405,51 @@ class NextRoundViewRR(discord.ui.View):
         await interaction.message.edit(view=self)
         await cog._execute_next_round(interaction)
 
-# ▼▼▼ 新規追加: チーム登録用のUIコンポーネント ▼▼▼
 class CreateTeamModal(discord.ui.Modal, title='チーム作成'):
-    """チーム名を入力するためのモーダル"""
-    team_name = discord.ui.TextInput(
-        label="チーム名",
-        placeholder="新しいチームの名前を入力してください",
-        required=True,
-        max_length=50
-    )
-
+    team_name = discord.ui.TextInput(label="チーム名", placeholder="新しいチームの名前を入力してください", required=True, max_length=50)
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         cog = interaction.client.get_cog("RoundRobin")
-        if cog:
-            await cog.handle_create_team(interaction, self.team_name.value)
+        if cog: await cog.handle_create_team(interaction, self.team_name.value)
 
 class TeamSelect(discord.ui.Select):
-    """参加するチームを選択するためのドロップダウン"""
     def __init__(self, cog, teams):
         options = [discord.SelectOption(label=team['name'], value=str(team['team_id'])) for team in teams]
-        if not options:
-            options.append(discord.SelectOption(label="参加可能なチームがありません", value="disabled", default=True))
-        
+        if not options: options.append(discord.SelectOption(label="参加可能なチームがありません", value="disabled", default=True))
         super().__init__(placeholder="参加したいチームを選択してください...", min_values=1, max_values=1, options=options, disabled=(not teams))
         self.cog = cog
-
     async def callback(self, interaction: discord.Interaction):
-        if self.values[0] == "disabled":
-            return await interaction.response.edit_message(content="現在参加可能なチームはありません。", view=None)
-        
+        if self.values[0] == "disabled": return await interaction.response.edit_message(content="現在参加可能なチームはありません。", view=None)
         await interaction.response.defer(ephemeral=True, thinking=True)
         team_id = int(self.values[0])
         await self.cog.handle_join_team(interaction, team_id)
         await interaction.edit_original_response(content="処理が完了しました。", view=None)
 
-
 class TeamSelectView(discord.ui.View):
-    """TeamSelectドロップダウンを持つView"""
     def __init__(self, cog, teams):
         super().__init__(timeout=180)
         self.add_item(TeamSelect(cog, teams))
 
 class RegistrationView(discord.ui.View):
-    """チーム作成、参加、脱退のボタンを持つ永続View"""
     def __init__(self):
         super().__init__(timeout=None)
-
     @discord.ui.button(label="チーム作成", style=discord.ButtonStyle.success, custom_id="rr_create_team")
     async def create_team(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(CreateTeamModal())
-
     @discord.ui.button(label="チームに参加", style=discord.ButtonStyle.primary, custom_id="rr_join_team")
     async def join_team(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         cog = interaction.client.get_cog("RoundRobin")
-        if not cog:
-            return await interaction.followup.send("エラー: 機能がロードされていません。", ephemeral=True)
-        
+        if not cog: return await interaction.followup.send("エラー: 機能がロードされていません。", ephemeral=True)
         teams = await cog.get_joinable_teams(interaction.guild.id)
-        if not teams:
-            return await interaction.followup.send("現在参加できるチームがありません。", ephemeral=True)
-            
+        if not teams: return await interaction.followup.send("現在参加できるチームがありません。", ephemeral=True)
         view = TeamSelectView(cog, teams)
         await interaction.followup.send("参加するチームを選んでください:", view=view, ephemeral=True)
-
     @discord.ui.button(label="チームから脱退", style=discord.ButtonStyle.danger, custom_id="rr_leave_team")
     async def leave_team(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         cog = interaction.client.get_cog("RoundRobin")
-        if cog:
-            await cog.handle_leave_team(interaction)
-# ▲▲▲ 新規追加ここまで ▲▲▲
-
+        if cog: await cog.handle_leave_team(interaction)
 
 ==================================================
 File: cogs\shadowverse\card_manager.py
@@ -3760,9 +3919,22 @@ class ShadowverseCog(commands.Cog):
         self.model_load_task = asyncio.create_task(self._initialize_model())
         self.bot.add_view(ControlPanelView(self.bot))
 
+        # --- 右クリックメニュー（コンテキストメニュー）の定義 ---
+        # メッセージを右クリックした時に表示されるメニュー
+        self.ctx_menu_replay = app_commands.ContextMenu(
+            name="戦績画像を読み取る",
+            callback=self.replay_context_menu,
+        )
+        # Botのツリーにメニューを登録
+        self.bot.tree.add_command(self.ctx_menu_replay)
+
     async def cog_load(self):
         """Cog読み込み時に非同期でDBを初期化"""
         await async_init_database()
+
+    async def cog_unload(self):
+        """Cogがアンロードされる時にメニューを削除"""
+        self.bot.tree.remove_command(self.ctx_menu_replay.name, type=self.ctx_menu_replay.type)
 
     async def _initialize_model(self):
         """非同期でOCRモデルを読み込みます。"""
@@ -3776,9 +3948,7 @@ class ShadowverseCog(commands.Cog):
     async def _send_result_embed_from_interaction(self, interaction: discord.Interaction, embed: discord.Embed, force_public: bool = False):
         """
         インタラクションに応じてEmbedを送信するヘルパー関数。
-        force_publicがTrueの場合のみ、設定された通知チャンネルへの投稿を試みます。
         """
-        # 修正: 非同期関数になったので await を追加
         target_channel_id = await get_user_channel_setting(interaction.user.id)
         target_channel = self.bot.get_channel(target_channel_id) if target_channel_id else None
 
@@ -3790,55 +3960,39 @@ class ShadowverseCog(commands.Cog):
                 await interaction.followup.send(f"❌ 設定されたチャンネル {target_channel.mention} にメッセージを送信する権限がありません。代わりにここに表示します。", ephemeral=True)
                 await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            # DMの場合は通常メッセージ、サーバー内の場合はephemeralステータスをdeferから引き継ぐ
             await interaction.followup.send(embed=embed)
 
-    @commands.command(name="panel")
-    async def deploy_panel(self, ctx: commands.Context):
-        """コントロールパネルを設置します。"""
-        embed = discord.Embed(title="⚔️ シャドウバース 戦績管理パネル ⚔️", description="下のボタンから各機能をご利用ください。\n\n**⚠️ まずはじめに、`⚙️ 通知チャンネル設定` ボタンから結果を投稿する個人チャンネルを設定してください。**", color=discord.Color.purple())
-        await ctx.send(embed=embed, view=ControlPanelView(self.bot))
-        try:
-            await ctx.message.delete()
-        except discord.Forbidden:
-            pass
-
-    @app_commands.command(name="record", description="ボタン操作で戦績を手動で登録します。")
-    async def manual_record(self, interaction: discord.Interaction):
-        view = ManualRecordView(author_id=interaction.user.id)
-        await interaction.response.send_message(embed=view.create_embed(), view=view, ephemeral=True)
-
-    @app_commands.command(name="replay", description="Shadowverseのリプレイ画像から戦績を記録します。")
-    async def replay_record(self, interaction: discord.Interaction, image: discord.Attachment):
+    # --- 共通ロジック: 画像処理と登録 ---
+    async def _execute_replay_processing(self, interaction: discord.Interaction, attachment: discord.Attachment):
+        """スラッシュコマンドと右クリックメニューで共通して使う画像処理ロジック"""
         if self.ocr is None:
-            return await interaction.response.send_message("OCRモデル準備中です。しばらくお待ちください。", ephemeral=True)
-        
-        # DMでの利用時は通常の応答、サーバー内ではephemeralな応答に
-        is_dm = interaction.guild is None
-        await interaction.response.defer(ephemeral=not is_dm)
+            return await interaction.followup.send("OCRモデル準備中です。しばらくお待ちください。", ephemeral=True)
 
-        if not image.content_type or not image.content_type.startswith('image/'):
-            return await interaction.followup.send("画像ファイルを添付してください。")
+        if not attachment.content_type or not attachment.content_type.startswith('image/'):
+            return await interaction.followup.send("画像ファイルを添付してください。", ephemeral=True)
         
         temp_image_path = f"temp_{interaction.id}.png"
-        await image.save(temp_image_path)
+        await attachment.save(temp_image_path)
+        
         try:
-            # OCR処理などのCPUバウンドな処理はラップする
-            async def processing_task():
+            # OCR処理（重い処理）
+            # 修正点: ここを async def から def に変更 (to_threadは同期関数を受け取るため)
+            def processing_task():
                 text_data = extract_text_from_image(self.ocr, temp_image_path)
                 if not text_data: return "❌ 画像からテキストを読み取れませんでした。", None
                 all_records = parse_replay_text(text_data)
                 if not all_records: return f"❌ 画像から戦績データを解析できませんでした。", None
                 return None, all_records
 
-            error_msg, all_records = await asyncio.to_thread(processing_task) # ここは同期関数のままなのでスレッドで
+            # スレッドプールで実行して結果を待つ
+            error_msg, all_records = await asyncio.to_thread(processing_task)
             
             if error_msg:
                 embed = discord.Embed(title="リプレイ一括登録 結果", description=error_msg, color=discord.Color.red())
                 await self._send_result_embed_from_interaction(interaction, embed)
                 return
 
-            # 修正: DB保存は非同期になったので直接 await
+            # DB保存
             saved_records, duplicate_count = await save_records_to_db(interaction.user.id, all_records)
             
             parts = []
@@ -3860,6 +4014,47 @@ class ShadowverseCog(commands.Cog):
         finally:
             if os.path.exists(temp_image_path):
                 os.remove(temp_image_path)
+
+    # --- コマンド定義 ---
+
+    @commands.command(name="panel")
+    async def deploy_panel(self, ctx: commands.Context):
+        """コントロールパネルを設置します。"""
+        embed = discord.Embed(title="⚔️ シャドウバース 戦績管理パネル ⚔️", description="下のボタンから各機能をご利用ください。\n\n**⚠️ まずはじめに、`⚙️ 通知チャンネル設定` ボタンから結果を投稿する個人チャンネルを設定してください。**", color=discord.Color.purple())
+        await ctx.send(embed=embed, view=ControlPanelView(self.bot))
+        try:
+            await ctx.message.delete()
+        except discord.Forbidden:
+            pass
+
+    @app_commands.command(name="record", description="ボタン操作で戦績を手動で登録します。")
+    async def manual_record(self, interaction: discord.Interaction):
+        view = ManualRecordView(author_id=interaction.user.id)
+        await interaction.response.send_message(embed=view.create_embed(), view=view, ephemeral=True)
+
+    @app_commands.command(name="replay", description="Shadowverseのリプレイ画像から戦績を記録します。")
+    async def replay_record(self, interaction: discord.Interaction, image: discord.Attachment):
+        # DMでの利用時は通常の応答、サーバー内ではephemeralな応答に
+        is_dm = interaction.guild is None
+        await interaction.response.defer(ephemeral=not is_dm)
+        # 共通ロジックを呼び出す
+        await self._execute_replay_processing(interaction, image)
+
+    # --- 右クリックメニューのコールバック ---
+    async def replay_context_menu(self, interaction: discord.Interaction, message: discord.Message):
+        # メッセージに画像が含まれているか確認
+        if not message.attachments:
+            await interaction.response.send_message("❌ このメッセージには画像が添付されていません。", ephemeral=True)
+            return
+        
+        # 最初の添付ファイルを画像として処理
+        target_attachment = message.attachments[0]
+        
+        is_dm = interaction.guild is None
+        await interaction.response.defer(ephemeral=not is_dm)
+        
+        # 共通ロジックを呼び出す
+        await self._execute_replay_processing(interaction, target_attachment)
 
     @app_commands.command(name="stats", description="自分の戦績サマリーを表示します。")
     @app_commands.describe(period="集計期間", class_name="クラスを指定")
@@ -3886,7 +4081,6 @@ class ShadowverseCog(commands.Cog):
     async def show_history(self, interaction: discord.Interaction, count: app_commands.Range[int, 1, 25] = 5):
         await interaction.response.defer(thinking=True, ephemeral=True)
         
-        # 履歴取得（Pandas使用）は同期的なので to_thread のまま
         embed, records = await asyncio.to_thread(get_recent_matches, interaction.user.id, count)
 
         if not records:
