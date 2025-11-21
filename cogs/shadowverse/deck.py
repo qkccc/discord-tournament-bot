@@ -8,9 +8,7 @@ import io
 from urllib.parse import urlparse, parse_qs, urlunparse, urlencode
 import asyncio
 import sqlite3 # データベース操作のためにインポート
-
-# --- グローバル変数・定数 ---
-DB_FILE = "data/deck_data.db" # 保存するデータベースファイル名
+from cogs.utils.constants import DB_FILE
 
 # --- データベース初期化関数 ---
 def init_database():
@@ -19,7 +17,7 @@ def init_database():
     cursor = conn.cursor()
     # decksテーブルを作成: user_idとdeck_urlを保存
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS decks (
+        CREATE TABLE IF NOT EXISTS sv_decks (
             user_id INTEGER NOT NULL,
             deck_url TEXT NOT NULL,
             PRIMARY KEY (user_id, deck_url)
@@ -149,14 +147,14 @@ class DeckCog(commands.Cog):
     # --- データベース操作メソッド ---
     def _db_add_deck(self, user_id: int, deck_url: str):
         with sqlite3.connect(DB_FILE) as conn:
-            conn.execute("INSERT OR IGNORE INTO decks (user_id, deck_url) VALUES (?, ?)", (user_id, deck_url))
+            conn.execute("INSERT OR IGNORE INTO sv_decks (user_id, deck_url) VALUES (?, ?)", (user_id, deck_url))
 
     async def db_add_deck(self, user_id: int, deck_url: str):
         await asyncio.to_thread(self._db_add_deck, user_id, deck_url)
 
     def _db_get_user_decks(self, user_id: int) -> list[str]:
         with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.execute("SELECT deck_url FROM decks WHERE user_id = ?", (user_id,))
+            cursor = conn.execute("SELECT deck_url FROM sv_decks WHERE user_id = ?", (user_id,))
             return [row[0] for row in cursor.fetchall()]
 
     async def db_get_user_decks(self, user_id: int) -> list[str]:
@@ -164,7 +162,7 @@ class DeckCog(commands.Cog):
 
     def _db_get_user_deck_count(self, user_id: int) -> int:
         with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM decks WHERE user_id = ?", (user_id,))
+            cursor = conn.execute("SELECT COUNT(*) FROM sv_decks WHERE user_id = ?", (user_id,))
             return cursor.fetchone()[0]
 
     async def db_get_user_deck_count(self, user_id: int) -> int:
@@ -173,7 +171,7 @@ class DeckCog(commands.Cog):
     def _db_delete_user_decks(self, user_id: int) -> int:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM decks WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM sv_decks WHERE user_id = ?", (user_id,))
             return cursor.rowcount
 
     async def db_delete_user_decks(self, user_id: int) -> int:
@@ -181,7 +179,7 @@ class DeckCog(commands.Cog):
 
     def _db_get_all_decks(self) -> dict[int, list[str]]:
         with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.execute("SELECT user_id, deck_url FROM decks ORDER BY user_id")
+            cursor = conn.execute("SELECT user_id, deck_url FROM sv_decks ORDER BY user_id")
             all_decks = {}
             for user_id, deck_url in cursor.fetchall():
                 all_decks.setdefault(user_id, []).append(deck_url)
@@ -192,7 +190,7 @@ class DeckCog(commands.Cog):
 
     def _db_delete_all_decks(self):
         with sqlite3.connect(DB_FILE) as conn:
-            conn.execute("DELETE FROM decks")
+            conn.execute("DELETE FROM sv_decks")
 
     async def db_delete_all_decks(self):
         await asyncio.to_thread(self._db_delete_all_decks)

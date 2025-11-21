@@ -1,4 +1,4 @@
-# cogs/tournament/cog.py
+# cogs/events/event_manager/cog.py
 import discord
 from discord.ext import commands
 import os
@@ -22,7 +22,8 @@ log = logging.getLogger(__name__)
 class EventManagerCog(commands.Cog, name="EventManager"):
     def __init__(self, bot):
         self.bot = bot
-        self.db = DatabaseManager('data/tournaments.db')
+        # 修正: 引数なしで初期化 (内部で main.db を使用)
+        self.db = DatabaseManager()
         self.recruit_sessions: Dict[int, dict] = {}
         self.swiss_tournaments: Dict[int, SwissTournament] = {}
         self.locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -41,22 +42,20 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             bot.add_view(NextRoundView())
             bot.persistent_views_added = True
         
-        # ▼▼▼ 変更点 ▼▼▼
         # Bot起動時に、アクティブなスイスドロー大会と「募集」をDBから復元するタスクを開始
         self.bot.loop.create_task(self._load_swiss_tournaments_from_db())
         self.bot.loop.create_task(self._load_active_recruitments())
-        # ▲▲▲ 変更ここまで ▲▲▲
 
     # ==============================================================================
-    # 既存のヘルパーメソッド、リスナー、コマンド（元のコードを完全に維持）
+    # 既存のヘルパーメソッド、リスナー、コマンド
     # ==============================================================================
 
-    # ▼▼▼ 変更点 ▼▼▼
     async def _load_active_recruitments(self):
         """データベースからアクティブな「募集」を復元する"""
         await self.bot.wait_until_ready()
         log.info("データベースからアクティブな募集セッションの復元を開始します...")
-        sessions_data = self.db.fetchall("SELECT * FROM recruitment_sessions")
+        # 修正: テーブル名 event_recruitments
+        sessions_data = self.db.fetchall("SELECT * FROM event_recruitments")
 
         for session_row in sessions_data:
             guild_id = session_row['guild_id']
@@ -65,7 +64,8 @@ class EventManagerCog(commands.Cog, name="EventManager"):
                 log.warning(f"Guild ID {guild_id} が見つからないため、募集セッションを復元できませんでした。")
                 continue
 
-            participants_data = self.db.fetchall("SELECT * FROM recruitment_participants WHERE guild_id = ?", (guild_id,))
+            # 修正: テーブル名 event_participants
+            participants_data = self.db.fetchall("SELECT * FROM event_participants WHERE guild_id = ?", (guild_id,))
             participants_set = set()
             for p_row in participants_data:
                 if p_row['is_dummy']:
@@ -85,13 +85,13 @@ class EventManagerCog(commands.Cog, name="EventManager"):
                 "participants": participants_set
             }
             log.info(f"Guild ID {guild_id} の募集セッションを正常に復元しました。")
-    # ▲▲▲ 変更ここまで ▲▲▲
 
     async def _load_swiss_tournaments_from_db(self):
         """データベースからアクティブな「スイスドロー」大会を復元する"""
         await self.bot.wait_until_ready()
         log.info("データベースからアクティブなスイスドロー大会の復元を開始します...")
-        tournaments_data = self.db.fetchall("SELECT * FROM tournaments WHERE is_active = ?", (True,))
+        # 修正: テーブル名 swiss_tournaments
+        tournaments_data = self.db.fetchall("SELECT * FROM swiss_tournaments WHERE is_active = ?", (True,))
 
         for row in tournaments_data:
             guild_id, is_active, round_num, max_rounds = row['guild_id'], row['is_active'], row['round_num'], row['max_rounds']
@@ -105,8 +105,8 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             tournament.round_num = round_num
             tournament.max_rounds = max_rounds
 
-            # playersテーブルからスイスドロー用の情報を取得
-            players_data = self.db.fetchall("SELECT * FROM players WHERE guild_id = ?", (guild_id,))
+            # 修正: テーブル名 event_players
+            players_data = self.db.fetchall("SELECT * FROM event_players WHERE guild_id = ?", (guild_id,))
             for p_row in players_data:
                 user_id, display_name, score, opponents_json, byes, wins, losses, matches_played, is_dummy = p_row['user_id'], p_row['display_name'], p_row['score'], p_row['opponents'], p_row['byes'], p_row['wins'], p_row['losses'], p_row['matches_played'], p_row['is_dummy']
                 member_obj: Union[discord.Member, DummyPlayer]
@@ -126,16 +126,18 @@ class EventManagerCog(commands.Cog, name="EventManager"):
                 player_obj.opponents = set(json.loads(opponents_json))
                 tournament.players[user_id] = player_obj
 
-            pairings_data = self.db.fetchall("SELECT player1_id, player2_id FROM current_pairings WHERE guild_id = ?", (guild_id,))
+            # 修正: テーブル名 swiss_pairings
+            pairings_data = self.db.fetchall("SELECT player1_id, player2_id FROM swiss_pairings WHERE guild_id = ?", (guild_id,))
             for pair_row in pairings_data:
                 p1 = tournament.get_player(pair_row['player1_id'])
                 p2 = tournament.get_player(pair_row['player2_id']) if pair_row['player2_id'] else None
                 if p1:
                     tournament.current_pairings.append((p1, p2))
 
-            reports_data = self.db.fetchall("SELECT winner_id, loser_id FROM reported_matches WHERE guild_id = ? AND round_num = ?", (guild_id, round_num))
+            # 修正: テーブル名 swiss_results
+            reports_data = self.db.fetchall("SELECT winner_id, loser_id FROM swiss_results WHERE guild_id = ? AND round_num = ?", (guild_id, round_num))
             for report_row in reports_data:
-                tournament.reported_matches_this_round.append((report_row[0], report_row[1], report_row[0])) # Assuming winner_id is the third element for compatibility
+                tournament.reported_matches_this_round.append((report_row[0], report_row[1], report_row[0])) 
 
             self.swiss_tournaments[guild_id] = tournament
             log.info(f"Guild ID {guild_id} のスイスドロー大会を正常に復元しました。")
@@ -161,11 +163,9 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         guild_id = interaction.guild.id
         session = self.recruit_sessions.pop(guild_id, None)
         if session:
-            # ▼▼▼ 変更点 ▼▼▼
-            # 募集終了時にDBから関連データを削除
-            self.db.execute("DELETE FROM recruitment_sessions WHERE guild_id = ?", (guild_id,))
-            self.db.execute("DELETE FROM recruitment_participants WHERE guild_id = ?", (guild_id,))
-            # ▲▲▲ 変更ここまで ▲▲▲
+            # 修正: テーブル名 event_recruitments, event_participants
+            self.db.execute("DELETE FROM event_recruitments WHERE guild_id = ?", (guild_id,))
+            self.db.execute("DELETE FROM event_participants WHERE guild_id = ?", (guild_id,))
             try:
                 channel = self.bot.get_channel(session['channel_id'])
                 if not channel: return set()
@@ -185,13 +185,11 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         member = guild.get_member(payload.user_id)
         if member:
             session['participants'].add(member)
-            # ▼▼▼ 変更点 ▼▼▼
-            # DBに参加者情報を追加
+            # 修正: テーブル名 event_participants
             self.db.execute(
-                "INSERT OR IGNORE INTO recruitment_participants (guild_id, user_id, display_name, is_dummy) VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO event_participants (guild_id, user_id, display_name, is_dummy) VALUES (?, ?, ?, ?)",
                 (payload.guild_id, member.id, member.display_name, False)
             )
-            # ▲▲▲ 変更ここまで ▲▲▲
             await self._update_recruitment_message(payload.guild_id)
 
     @commands.Cog.listener()
@@ -204,13 +202,11 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         member = guild.get_member(payload.user_id)
         if member and member in session['participants']:
             session['participants'].remove(member)
-            # ▼▼▼ 変更点 ▼▼▼
-            # DBから参加者情報を削除
+            # 修正: テーブル名 event_participants
             self.db.execute(
-                "DELETE FROM recruitment_participants WHERE guild_id = ? AND user_id = ?",
+                "DELETE FROM event_participants WHERE guild_id = ? AND user_id = ?",
                 (payload.guild_id, member.id)
             )
-            # ▲▲▲ 変更ここまで ▲▲▲
             await self._update_recruitment_message(payload.guild_id)
 
     @commands.command(name='募集', aliases=['スイスドロー'], help='各種イベントの参加者募集を開始します')
@@ -227,17 +223,16 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         msg = await ctx.send(embed=embed, view=view)
         await msg.add_reaction("👍")
         
-        # ▼▼▼ 変更点 ▼▼▼
-        # メモリとDBの両方にセッション情報を保存
         self.recruit_sessions[ctx.guild.id] = {"message_id": msg.id, "channel_id": ctx.channel.id, "participants": set()}
+        # 修正: テーブル名 event_recruitments
         self.db.execute(
-            "INSERT INTO recruitment_sessions (guild_id, message_id, channel_id) VALUES (?, ?, ?)",
+            "INSERT INTO event_recruitments (guild_id, message_id, channel_id) VALUES (?, ?, ?)",
             (ctx.guild.id, msg.id, ctx.channel.id)
         )
-        # ▲▲▲ 変更ここまで ▲▲▲
 
     async def _get_channels(self, guild_id: int) -> Tuple[Optional[discord.TextChannel], Optional[discord.TextChannel]]:
-        settings = self.db.fetchone("SELECT main_channel_id, match_channel_id FROM settings WHERE guild_id = ?", (guild_id,))
+        # 修正: テーブル名 event_settings
+        settings = self.db.fetchone("SELECT main_channel_id, match_channel_id FROM event_settings WHERE guild_id = ?", (guild_id,))
         main_ch_id = settings["main_channel_id"] if settings and settings["main_channel_id"] else self.DEFAULT_MAIN_CHANNEL_ID
         match_ch_id = settings["match_channel_id"] if settings and settings["match_channel_id"] else self.DEFAULT_MATCH_CHANNEL_ID
         main_ch = self.bot.get_channel(main_ch_id)
@@ -247,13 +242,15 @@ class EventManagerCog(commands.Cog, name="EventManager"):
     @commands.command(name='sd設定メイン', help='アナウンス用チャンネルを設定します。')
     @commands.has_permissions(manage_guild=True)
     async def set_main_channel(self, ctx: commands.Context):
-        self.db.execute("INSERT INTO settings (guild_id, main_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET main_channel_id = excluded.main_channel_id", (ctx.guild.id, ctx.channel.id))
+        # 修正: テーブル名 event_settings
+        self.db.execute("INSERT INTO event_settings (guild_id, main_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET main_channel_id = excluded.main_channel_id", (ctx.guild.id, ctx.channel.id))
         await ctx.send(f"✅ アナウンスチャンネルを `#{ctx.channel.name}` に設定しました。")
 
     @commands.command(name='sd設定対戦', help='対戦カード送信用チャンネルを設定します。')
     @commands.has_permissions(manage_guild=True)
     async def set_match_channel(self, ctx: commands.Context):
-        self.db.execute("INSERT INTO settings (guild_id, match_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET match_channel_id = excluded.match_channel_id", (ctx.guild.id, ctx.channel.id))
+        # 修正: テーブル名 event_settings
+        self.db.execute("INSERT INTO event_settings (guild_id, match_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET match_channel_id = excluded.match_channel_id", (ctx.guild.id, ctx.channel.id))
         await ctx.send(f"✅ 対戦カード送信用チャンネルを `#{ctx.channel.name}` に設定しました。")
     
     @commands.command(name='追加', help='募集中のリストにダミーの参加者を追加します。例: !追加 太郎')
@@ -262,25 +259,19 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         session = self.recruit_sessions.get(ctx.guild.id)
         if not session: return await ctx.send("参加者募集中のイベントがありません。")
 
-        # ▼▼▼ 変更点 ▼▼▼
         if name:
-            # 名前が指定された場合
-            # 既に同じ名前のダミーがいないかチェック
             if any(isinstance(p, DummyPlayer) and p.display_name == name for p in session['participants']):
                 return await ctx.send(f"エラー: `{name}` という名前のダミー参加者は既に追加されています。", ephemeral=True)
             dummy_name = name
-
         else:
-            # 名前が指定されない場合 (これまで通りの動作)
             dummy_name = f"ダミー{len([p for p in session['participants'] if isinstance(p, DummyPlayer)]) + 1}"
         
         dummy = DummyPlayer(dummy_name)
         session['participants'].add(dummy)
-        # ▲▲▲▲▲▲▲▲▲▲▲▲
 
-        # DBにダミー参加者を追加
+        # 修正: テーブル名 event_participants
         self.db.execute(
-                "INSERT OR IGNORE INTO recruitment_participants (guild_id, user_id, display_name, is_dummy) VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO event_participants (guild_id, user_id, display_name, is_dummy) VALUES (?, ?, ?, ?)",
                 (ctx.guild.id, dummy.id, dummy.display_name, True)
             )
         await self._update_recruitment_message(ctx.guild.id)
@@ -298,13 +289,11 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         dummies_to_remove = dummies[:count]
         for dummy in dummies_to_remove:
             session['participants'].remove(dummy)
-            # ▼▼▼ 変更点 ▼▼▼
-            # DBからダミー参加者を削除
+            # 修正: テーブル名 event_participants
             self.db.execute(
-                "DELETE FROM recruitment_participants WHERE guild_id = ? AND user_id = ?",
+                "DELETE FROM event_participants WHERE guild_id = ? AND user_id = ?",
                 (ctx.guild.id, dummy.id)
             )
-            # ▲▲▲ 変更ここまで ▲▲▲
         
         await self._update_recruitment_message(ctx.guild.id)
         await ctx.message.add_reaction("✅")
@@ -333,7 +322,7 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         await interaction.channel.send(f"**チーム分け結果** (参加者: {len(participants)}人)", embed=embed)
 
     # ==============================================================================
-    # スイスドロー機能のメソッド (変更なし)
+    # スイスドロー機能のメソッド
     # ==============================================================================
     async def _execute_start_swiss(self, interaction: discord.Interaction, rounds: int):
         """スイスドロー大会を開始する"""
@@ -347,12 +336,13 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         tournament.round_num = 1
         self.swiss_tournaments[guild_id] = tournament
 
-        self.db.execute("DELETE FROM tournaments WHERE guild_id = ?", (guild_id,))
-        self.db.execute("DELETE FROM players WHERE guild_id = ?", (guild_id,))
-        self.db.execute("INSERT INTO tournaments (guild_id, is_active, round_num, max_rounds) VALUES (?, ?, ?, ?)", (guild_id, True, 1, rounds if rounds > 0 else 0))
+        # 修正: テーブル名 swiss_tournaments, event_players
+        self.db.execute("DELETE FROM swiss_tournaments WHERE guild_id = ?", (guild_id,))
+        self.db.execute("DELETE FROM event_players WHERE guild_id = ?", (guild_id,))
+        self.db.execute("INSERT INTO swiss_tournaments (guild_id, is_active, round_num, max_rounds) VALUES (?, ?, ?, ?)", (guild_id, True, 1, rounds if rounds > 0 else 0))
         
         player_data = [(guild_id, p.id, p.display_name, isinstance(p.member, DummyPlayer), p.score, json.dumps(list(p.opponents)), p.byes, p.wins, p.losses, p.matches_played) for p in tournament.players.values()]
-        if player_data: self.db.execute("INSERT INTO players (guild_id, user_id, display_name, is_dummy, score, opponents, byes, wins, losses, matches_played) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", player_data)
+        if player_data: self.db.execute("INSERT INTO event_players (guild_id, user_id, display_name, is_dummy, score, opponents, byes, wins, losses, matches_played) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", player_data)
 
         start_msg = f"**スイスドロー大会を開始します！** (参加者: {len(participants)}人)"
         start_msg += f" 全{rounds}ラウンドです。" if rounds > 0 else " 全勝者が1人になるまで続きます。"
@@ -371,15 +361,17 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         
         pairings = tournament.generate_pairings()
         
-        self.db.execute("DELETE FROM current_pairings WHERE guild_id = ?", (guild.id,))
+        # 修正: テーブル名 swiss_pairings
+        self.db.execute("DELETE FROM swiss_pairings WHERE guild_id = ?", (guild.id,))
         if pairings:
             db_pairings = [(guild.id, p1.id, p2.id if p2 else None) for p1, p2 in pairings]
-            self.db.execute("INSERT INTO current_pairings (guild_id, player1_id, player2_id) VALUES (?, ?, ?)", db_pairings)
+            self.db.execute("INSERT INTO swiss_pairings (guild_id, player1_id, player2_id) VALUES (?, ?, ?)", db_pairings)
         
         for p1, p2 in pairings:
-            self.db.execute("UPDATE players SET opponents = ? WHERE guild_id = ? AND user_id = ?", (json.dumps(list(p1.opponents)), guild.id, p1.id))
-            if p2: self.db.execute("UPDATE players SET opponents = ? WHERE guild_id = ? AND user_id = ?", (json.dumps(list(p2.opponents)), guild.id, p2.id))
-            else: self.db.execute("UPDATE players SET byes = ?, wins = ?, score = ? WHERE guild_id = ? AND user_id = ?", (p1.byes, p1.wins, p1.score, guild.id, p1.id))
+            # 修正: テーブル名 event_players
+            self.db.execute("UPDATE event_players SET opponents = ? WHERE guild_id = ? AND user_id = ?", (json.dumps(list(p1.opponents)), guild.id, p1.id))
+            if p2: self.db.execute("UPDATE event_players SET opponents = ? WHERE guild_id = ? AND user_id = ?", (json.dumps(list(p2.opponents)), guild.id, p2.id))
+            else: self.db.execute("UPDATE event_players SET byes = ?, wins = ?, score = ? WHERE guild_id = ? AND user_id = ?", (p1.byes, p1.wins, p1.score, guild.id, p1.id))
 
         sorted_pairings = sorted(pairings, key=lambda pair: pair[0].id if pair[1] is None else min(pair[0].id, pair[1].id))
         desc = '\n'.join(f"**試合 {i+1}**: {p1.display_name} ({p1.record}) ⚔️ {p2.display_name} ({p2.record})" if p2 else f"**不戦勝**: {p1.display_name} ({p1.record}) 🏆" for i, (p1, p2) in enumerate(sorted_pairings))
@@ -407,9 +399,10 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         loser.losses += 1; loser.matches_played += 1
         tournament.reported_matches_this_round.append((winner.id, loser.id, winner.id))
         
-        self.db.execute("UPDATE players SET score=?, wins=?, matches_played=? WHERE guild_id=? AND user_id=?", (winner.score, winner.wins, winner.matches_played, guild_id, winner_id))
-        self.db.execute("UPDATE players SET losses=?, matches_played=? WHERE guild_id=? AND user_id=?", (loser.losses, loser.matches_played, guild_id, loser_id))
-        self.db.execute("INSERT INTO reported_matches (guild_id, round_num, winner_id, loser_id) VALUES (?, ?, ?, ?)", (guild_id, tournament.round_num, winner_id, loser_id))
+        # 修正: テーブル名 event_players, swiss_results
+        self.db.execute("UPDATE event_players SET score=?, wins=?, matches_played=? WHERE guild_id=? AND user_id=?", (winner.score, winner.wins, winner.matches_played, guild_id, winner_id))
+        self.db.execute("UPDATE event_players SET losses=?, matches_played=? WHERE guild_id=? AND user_id=?", (loser.losses, loser.matches_played, guild_id, loser_id))
+        self.db.execute("INSERT INTO swiss_results (guild_id, round_num, winner_id, loser_id) VALUES (?, ?, ?, ?)", (guild_id, tournament.round_num, winner_id, loser_id))
         
         await interaction.followup.send(f"✅ {winner.display_name} が {loser.display_name} に勝利しました！", ephemeral=True)
         
@@ -442,9 +435,10 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         if winner: winner.score -= 1.0; winner.wins -= 1; winner.matches_played -= 1
         if loser: loser.losses -= 1; loser.matches_played -= 1
         
-        self.db.execute("DELETE FROM reported_matches WHERE guild_id = ? AND round_num = ? AND winner_id = ? AND loser_id = ?", (guild_id, tournament.round_num, winner_id, loser_id))
-        if winner: self.db.execute("UPDATE players SET score=?, wins=?, matches_played=? WHERE guild_id=? AND user_id=?", (winner.score, winner.wins, winner.matches_played, guild_id, winner.id))
-        if loser: self.db.execute("UPDATE players SET losses=?, matches_played=? WHERE guild_id=? AND user_id=?", (loser.losses, loser.matches_played, guild_id, loser.id))
+        # 修正: テーブル名 swiss_results, event_players
+        self.db.execute("DELETE FROM swiss_results WHERE guild_id = ? AND round_num = ? AND winner_id = ? AND loser_id = ?", (guild_id, tournament.round_num, winner_id, loser_id))
+        if winner: self.db.execute("UPDATE event_players SET score=?, wins=?, matches_played=? WHERE guild_id=? AND user_id=?", (winner.score, winner.wins, winner.matches_played, guild_id, winner.id))
+        if loser: self.db.execute("UPDATE event_players SET losses=?, matches_played=? WHERE guild_id=? AND user_id=?", (loser.losses, loser.matches_played, guild_id, loser.id))
         
         await interaction.followup.send(f"✅ {p1.display_name}と{p2.display_name}の試合結果を取り消しました。", ephemeral=True)
         
@@ -478,15 +472,17 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             
             await main_ch.send(msg); await self._display_standings(interaction, final=True, channel=main_ch)
             
-            self.db.execute("DELETE FROM tournaments WHERE guild_id = ?", (guild_id,))
-            self.db.execute("DELETE FROM players WHERE guild_id = ?", (guild_id,))
-            self.db.execute("DELETE FROM current_pairings WHERE guild_id = ?", (guild_id,))
-            self.db.execute("DELETE FROM reported_matches WHERE guild_id = ?", (guild_id,))
+            # 修正: テーブル名 swiss_tournaments, event_players, swiss_pairings, swiss_results
+            self.db.execute("DELETE FROM swiss_tournaments WHERE guild_id = ?", (guild_id,))
+            self.db.execute("DELETE FROM event_players WHERE guild_id = ?", (guild_id,))
+            self.db.execute("DELETE FROM swiss_pairings WHERE guild_id = ?", (guild_id,))
+            self.db.execute("DELETE FROM swiss_results WHERE guild_id = ?", (guild_id,))
             self.swiss_tournaments.pop(guild_id, None)
             return
 
         tournament.round_num += 1
-        self.db.execute("UPDATE tournaments SET round_num = ? WHERE guild_id = ?", (tournament.round_num, guild_id))
+        # 修正: テーブル名 swiss_tournaments
+        self.db.execute("UPDATE swiss_tournaments SET round_num = ? WHERE guild_id = ?", (tournament.round_num, guild_id))
         
         await main_ch.send(f"**第 {tournament.round_num} ラウンドを開始します！**")
         await self.generate_and_send_pairings(interaction.guild, main_ch, match_ch)
@@ -520,11 +516,12 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             tourney_size = 2 ** num_rounds
             num_byes = tourney_size - num_players
 
-            self.db.execute("DELETE FROM se_matches WHERE guild_id = ?", (guild_id,)); self.db.execute("DELETE FROM se_tournaments WHERE guild_id = ?", (guild_id,)); self.db.execute("DELETE FROM players WHERE guild_id = ?", (guild_id,))
+            # 修正: テーブル名 event_players
+            self.db.execute("DELETE FROM se_matches WHERE guild_id = ?", (guild_id,)); self.db.execute("DELETE FROM se_tournaments WHERE guild_id = ?", (guild_id,)); self.db.execute("DELETE FROM event_players WHERE guild_id = ?", (guild_id,))
             self.db.execute("INSERT INTO se_tournaments (guild_id, is_active, num_players, num_rounds, bracket_message_id) VALUES (?, ?, ?, ?, ?)", (guild_id, True, num_players, num_rounds, None))
 
             player_db_data = [(guild_id, p.id, p.display_name, isinstance(p, DummyPlayer)) for p in participants_set]
-            if player_db_data: self.db.execute("INSERT INTO players (guild_id, user_id, display_name, is_dummy) VALUES (?, ?, ?, ?)", player_db_data)
+            if player_db_data: self.db.execute("INSERT INTO event_players (guild_id, user_id, display_name, is_dummy) VALUES (?, ?, ?, ?)", player_db_data)
             
             player_list_for_seeding = [{"id": p.id, "name": p.display_name, "member": p} for p in participants_set]
             byes = [{"id": None, "name": "(不戦勝)", "is_bye": True} for _ in range(num_byes)]
@@ -591,7 +588,8 @@ class EventManagerCog(commands.Cog, name="EventManager"):
                 if current_match and current_match["winner_id"] is not None: return await interaction.followup.send("この試合は既に結果が報告されています。", ephemeral=True)
 
                 self.db.execute("UPDATE se_matches SET winner_id = ? WHERE guild_id = ? AND match_id = ?", (winner_id, guild_id, match_id)); await interaction.followup.send("勝利報告を受け付けました！", ephemeral=True)
-                p_map = {p["user_id"]: p["display_name"] for p in self.db.fetchall("SELECT user_id, display_name FROM players WHERE guild_id = ?", (guild_id,))}
+                # 修正: テーブル名 event_players
+                p_map = {p["user_id"]: p["display_name"] for p in self.db.fetchall("SELECT user_id, display_name FROM event_players WHERE guild_id = ?", (guild_id,))}
                 embed = discord.Embed(title=f"結果: {p_map.get(winner_id, '不明')} の勝利！", color=discord.Color.green()); await interaction.message.edit(embed=embed, view=None)
 
                 next_match = self.db.fetchone("SELECT * FROM se_matches WHERE guild_id = ? AND (player1_source_match_id = ? OR player2_source_match_id = ?)",(guild_id, match_id, match_id))
@@ -606,7 +604,8 @@ class EventManagerCog(commands.Cog, name="EventManager"):
                     updated_next_match = self.db.fetchone("SELECT * FROM se_matches WHERE guild_id = ? AND match_id = ?", (guild_id, next_match_id))
                     if updated_next_match["player1_id"] and updated_next_match["player2_id"]:
                         async def get_p_obj(pid):
-                            d = self.db.fetchone("SELECT display_name, is_dummy FROM players WHERE guild_id = ? AND user_id = ?", (guild_id, pid))
+                            # 修正: テーブル名 event_players
+                            d = self.db.fetchone("SELECT display_name, is_dummy FROM event_players WHERE guild_id = ? AND user_id = ?", (guild_id, pid))
                             if d['is_dummy']: obj = DummyPlayer(d['display_name']); obj.id=pid; return obj
                             return await self.bot.fetch_user(pid)
                         p1, p2 = await get_p_obj(updated_next_match["player1_id"]), await get_p_obj(updated_next_match["player2_id"])
@@ -644,13 +643,15 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         if guild_id in self.recruit_sessions:
             await self._close_recruitment(interaction, "募集が中止されました。")
         if guild_id in self.swiss_tournaments:
-            self.db.execute("DELETE FROM tournaments WHERE guild_id = ?", (guild_id,))
-            self.db.execute("DELETE FROM current_pairings WHERE guild_id = ?", (guild_id,))
-            self.db.execute("DELETE FROM reported_matches WHERE guild_id = ?", (guild_id,))
+            # 修正: テーブル名 swiss_tournaments, swiss_pairings, swiss_results
+            self.db.execute("DELETE FROM swiss_tournaments WHERE guild_id = ?", (guild_id,))
+            self.db.execute("DELETE FROM swiss_pairings WHERE guild_id = ?", (guild_id,))
+            self.db.execute("DELETE FROM swiss_results WHERE guild_id = ?", (guild_id,))
             self.swiss_tournaments.pop(guild_id, None)
         self.db.execute("DELETE FROM se_matches WHERE guild_id = ?", (guild_id,))
         self.db.execute("DELETE FROM se_tournaments WHERE guild_id = ?", (guild_id,))
-        self.db.execute("DELETE FROM players WHERE guild_id = ?", (guild_id,))
+        # 修正: テーブル名 event_players
+        self.db.execute("DELETE FROM event_players WHERE guild_id = ?", (guild_id,))
         await interaction.message.edit(content="🚨 募集または大会を中止し、データをリセットしました。", view=None)
 
     @commands.command(name='ヘルプ3', aliases=['sdヘルプ'], help='大会・チーム分け機能の詳細なヘルプを表示します。')

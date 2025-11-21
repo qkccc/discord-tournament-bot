@@ -125,8 +125,9 @@ def get_recent_matches(user_id: int, count: int) -> tuple[Embed, list[dict]]:
     """
     conn = sqlite3.connect(DB_FILE)
     try:
+        # 修正: FROM matches -> FROM sv_matches
         recent_df = pd.read_sql_query(
-            "SELECT * FROM matches WHERE user_id = ? ORDER BY match_time DESC LIMIT ?",
+            "SELECT * FROM sv_matches WHERE user_id = ? ORDER BY match_time DESC LIMIT ?",
             conn,
             params=(user_id, count)
         )

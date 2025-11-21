@@ -8,8 +8,7 @@ from dotenv import load_dotenv
 # .envファイルを読み込む
 load_dotenv()
 
-# --- 環境変数から設定を読み込み ---
-DB_FILE = os.getenv("DB_FILE", "data/voice_log.db")
+from cogs.utils.constants import DB_FILE
 
 class VoiceLoggerCog(commands.Cog):
     # JSTタイムゾーンをクラス変数として定義
@@ -67,14 +66,14 @@ class VoiceLoggerCog(commands.Cog):
                 )
             """)
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS sub_accounts (
+                CREATE TABLE IF NOT EXISTS user_sub_accounts (
                     main_user_id INTEGER NOT NULL,
                     sub_user_id INTEGER NOT NULL PRIMARY KEY
                 )
             """)
             # ★新規追加: サーバーごとの設定を保存するテーブル
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS guild_settings (
+                CREATE TABLE IF NOT EXISTS voice_guild_settings (
                     guild_id INTEGER PRIMARY KEY,
                     call_notification_channel_id INTEGER
                 )
@@ -182,7 +181,7 @@ class VoiceLoggerCog(commands.Cog):
         """★新規追加: データベースからサーバーの通知チャンネルIDを取得するヘルパー関数"""
         try:
             cursor = self.db_conn.cursor()
-            cursor.execute("SELECT call_notification_channel_id FROM guild_settings WHERE guild_id = ?", (guild_id,))
+            cursor.execute("SELECT call_notification_channel_id FROM voice_guild_settings WHERE guild_id = ?", (guild_id,))
             result = cursor.fetchone()
             # 結果が存在し、かつチャンネルIDが設定されている場合のみIDを返す
             return result[0] if result and result[0] else None
@@ -282,7 +281,7 @@ class VoiceLoggerCog(commands.Cog):
     def is_sub_account_in_vc(self, main_user_id: int, users_in_vc: set) -> bool:
         try:
             cursor = self.db_conn.cursor()
-            cursor.execute("SELECT sub_user_id FROM sub_accounts WHERE main_user_id = ?", (main_user_id,))
+            cursor.execute("SELECT sub_user_id FROM user_sub_accounts WHERE main_user_id = ?", (main_user_id,))
             sub_account_ids = {row[0] for row in cursor.fetchall()}
             return not sub_account_ids.isdisjoint(users_in_vc)
         except sqlite3.Error as e:
@@ -437,7 +436,7 @@ class VoiceLoggerCog(commands.Cog):
         try:
             cursor = self.db_conn.cursor()
             # INSERT OR REPLACEで、存在しない場合は新規作成、存在する場合は更新
-            cursor.execute("INSERT OR REPLACE INTO guild_settings (guild_id, call_notification_channel_id) VALUES (?, ?)", (ctx.guild.id, channel.id))
+            cursor.execute("INSERT OR REPLACE INTO voice_guild_settings (guild_id, call_notification_channel_id) VALUES (?, ?)", (ctx.guild.id, channel.id))
             self.db_conn.commit()
             embed = discord.Embed(
                 title="✅ 設定完了",
@@ -493,7 +492,7 @@ class VoiceLoggerCog(commands.Cog):
             return await ctx.send("自分自身をサブアカウントとして登録することはできません。")
         try:
             cursor = self.db_conn.cursor()
-            cursor.execute("INSERT OR REPLACE INTO sub_accounts (main_user_id, sub_user_id) VALUES (?, ?)", (main_account.id, sub_account.id))
+            cursor.execute("INSERT OR REPLACE INTO user_sub_accounts (main_user_id, sub_user_id) VALUES (?, ?)", (main_account.id, sub_account.id))
             self.db_conn.commit()
             embed = discord.Embed(title="✅ サブアカウント登録完了", description="以下の通り登録しました。", color=0x2ECC71)
             embed.add_field(name="メインアカウント", value=f"`{str(main_account)}`", inline=False)
@@ -513,7 +512,7 @@ class VoiceLoggerCog(commands.Cog):
         try:
             cursor = self.db_conn.cursor()
             initial_changes = self.db_conn.total_changes
-            cursor.execute("DELETE FROM sub_accounts WHERE sub_user_id = ?", (sub_id,))
+            cursor.execute("DELETE FROM user_sub_accounts WHERE sub_user_id = ?", (sub_id,))
             self.db_conn.commit()
             if self.db_conn.total_changes > initial_changes:
                  await ctx.send(f"✅ {user_name} のサブアカウント登録を解除しました。")
@@ -526,7 +525,7 @@ class VoiceLoggerCog(commands.Cog):
     async def list_sub_accounts(self, ctx):
         try:
             cursor = self.db_conn.cursor()
-            cursor.execute("SELECT main_user_id, sub_user_id FROM sub_accounts ORDER BY main_user_id")
+            cursor.execute("SELECT main_user_id, sub_user_id FROM user_sub_accounts ORDER BY main_user_id")
             all_subs = cursor.fetchall()
             if not all_subs:
                 return await ctx.send("サブアカウントは一件も登録されていません。")

@@ -19,7 +19,7 @@ class RoundRobinCog(commands.Cog, name="RoundRobin"):
     """チーム登録制の総当たり戦を管理するCog"""
     def __init__(self, bot):
         self.bot = bot
-        self.db = DatabaseManager('data/tournaments.db')
+        self.db = DatabaseManager()
         
         load_dotenv()
         try: self.rr_channel_id = int(os.getenv('RR_CHANNEL_ID', 0))

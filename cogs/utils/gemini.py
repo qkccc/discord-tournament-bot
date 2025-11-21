@@ -23,8 +23,7 @@ model = genai.GenerativeModel(
 # 会話履歴を保持する上限数を設定
 MAX_HISTORY = 10 
 
-# データベースファイルのパスを定数として定義
-DB_PATH = 'data/gemini_history.db'
+from cogs.utils.constants import DB_FILE
 
 class GeminiCog(commands.Cog):
     def __init__(self, bot):
@@ -35,10 +34,10 @@ class GeminiCog(commands.Cog):
 
     def _init_db(self):
         """データベースを初期化し、履歴保存用のテーブルを作成する。"""
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS chat_history (
+                CREATE TABLE IF NOT EXISTS gemini_chat_history (
                     channel_id INTEGER PRIMARY KEY,
                     history TEXT NOT NULL
                 )
@@ -65,9 +64,9 @@ class GeminiCog(commands.Cog):
 
     def _load_history(self, channel_id: int) -> list:
         """データベースから指定されたチャンネルの会話履歴を読み込む。"""
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT history FROM chat_history WHERE channel_id = ?", (channel_id,))
+            cursor.execute("SELECT history FROM gemini_chat_history WHERE channel_id = ?", (channel_id,))
             result = cursor.fetchone()
             if result:
                 return self._deserialize_history(result[0])
@@ -76,10 +75,10 @@ class GeminiCog(commands.Cog):
     def _save_history(self, channel_id: int, history: list):
         """指定されたチャンネルの会話履歴をデータベースに保存する。"""
         serialized_history = self._serialize_history(history)
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT OR REPLACE INTO chat_history (channel_id, history)
+                INSERT OR REPLACE INTO gemini_chat_history (channel_id, history)
                 VALUES (?, ?)
             ''', (channel_id, serialized_history))
             conn.commit()

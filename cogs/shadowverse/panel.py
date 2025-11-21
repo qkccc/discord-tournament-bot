@@ -7,7 +7,7 @@ import asyncio
 import sqlite3 # SQLiteを扱うためにインポート
 
 # --- 定数 ---
-DB_FILE = "data/user_data.db"  # データベースファイルの名前
+DB_FILE = "data/main.db"
 TARGET_CATEGORY_ID = 1003574017900417094 # 通知先として選択できるチャンネルが含まれるカテゴリID
 
 # --- データベース管理クラス ---
@@ -25,7 +25,7 @@ class DatabaseManager:
         """テーブルが存在しない場合に自動で作成する"""
         with self._get_connection() as conn:
             conn.execute('''
-                CREATE TABLE IF NOT EXISTS sv_channel_settings (
+                CREATE TABLE IF NOT EXISTS sv_user_settings (
                     user_id INTEGER PRIMARY KEY,
                     channel_id INTEGER NOT NULL
                 )
@@ -35,17 +35,17 @@ class DatabaseManager:
     # --- 同期メソッド (裏側で実行) ---
     def _set_channel_sync(self, user_id: int, channel_id: int):
         with self._get_connection() as conn:
-            conn.execute("INSERT OR REPLACE INTO sv_channel_settings (user_id, channel_id) VALUES (?, ?)", (user_id, channel_id))
+            conn.execute("INSERT OR REPLACE INTO sv_user_settings (user_id, channel_id) VALUES (?, ?)", (user_id, channel_id))
 
     def _get_channel_sync(self, user_id: int) -> int | None:
         with self._get_connection() as conn:
-            cursor = conn.execute("SELECT channel_id FROM sv_channel_settings WHERE user_id = ?", (user_id,))
+            cursor = conn.execute("SELECT channel_id FROM sv_user_settings WHERE user_id = ?", (user_id,))
             result = cursor.fetchone()
             return result[0] if result else None
 
     def _clear_channel_sync(self, user_id: int):
         with self._get_connection() as conn:
-            conn.execute("DELETE FROM sv_channel_settings WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM sv_user_settings WHERE user_id = ?", (user_id,))
 
     # --- 非同期メソッド (Cogから呼び出す用) ---
     async def set_user_channel(self, user_id: int, channel_id: int):
