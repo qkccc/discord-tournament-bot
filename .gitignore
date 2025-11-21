@@ -1,0 +1,29 @@
+# セキュリティ（絶対に上げない！）
+.env
+
+# Pythonの不要ファイル
+__pycache__/
+*.pyc
+
+# 仮想環境
+venv/
+.venv/
+env/
+
+# データベース（個人情報や戦績データはローカルに残す）
+*.db
+*.sqlite3
+data/
+
+# ログファイル
+*.log
+
+# OSの不要ファイル
+.DS_Store
+Thumbs.db
+
+# フォントファイル（著作権＆容量対策）
+*.ttc
+*.ttf
+assets/meiryo.ttc
+assets/meiryob.ttc

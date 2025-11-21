@@ -1,0 +1,19 @@
+# Discord Bot Core
+discord.py[voice]
+
+# Environment Variables
+python-dotenv
+
+# Tournament Cog
+Pillow
+
+# Shadowverse Cogs
+pandas
+opencv-python
+yomitoku
+
+# Gemini Cog
+google-generativeai
+
+# Music Cog
+yt-dlp
