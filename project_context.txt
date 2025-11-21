@@ -31,18 +31,26 @@ intents.voice_states = True     # ユーザーのボイスチャンネルへの�
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# 読み込むCogsのリスト (gemini_cogとshadowverse_cogを追加)
+# 読み込むCogsのリスト
 INITIAL_EXTENSIONS = [
-    'cogs.event_manager.cog',
-    'cogs.music_cog',
-    'cogs.voice_logger_cog',
-    'cogs.gemini_cog',
-    'cogs.deck_cog',
-    'cogs.shadowverse.cog',
-    'cogs.room_match_cog',
-    'cogs.shadowverse_card_manager.cog',
-    'cogs.reaction_cog',
-    'cogs.roundrobin.cog'
+    # 🏆 イベント関連 (eventsフォルダへ移動)
+    'cogs.events.event_manager.cog',
+    'cogs.events.roundrobin.cog',
+
+    # ⚔️ Shadowverse関連 (shadowverseフォルダへ集約)
+    'cogs.shadowverse.main',         # 元 cog.py
+    'cogs.shadowverse.deck',         # 元 deck_cog.py
+    'cogs.shadowverse.panel',        # 元 shadowverse_panel_cog.py
+    'cogs.shadowverse.card_manager', # 元 shadowverse_card_manager/cog.py
+    
+    # 🎵 音声関連 (設定済み)
+    'cogs.audio.music',
+    'cogs.audio.voice_logger',
+
+    # 🛠️ 便利機能 (設定済み)
+    'cogs.utils.gemini',
+    'cogs.utils.room_match',
+    'cogs.utils.reaction',
 ]
 
 # --- 定期実行タスク ---
@@ -343,7 +351,7 @@ import sqlite3
 import os
 
 # データベースファイル名を指定 (ルートフォルダに作成)
-DB_NAME = 'sv_cards.db'
+DB_NAME = 'data/sv_cards.db'
 
 # 既にファイルが存在する場合は実行しない
 if os.path.exists(DB_NAME):
@@ -375,928 +383,6 @@ else:
     conn.commit()
     conn.close()
     print(f"データベース '{DB_NAME}' とテーブル 'cards' を新規作成しました。")
-
-==================================================
-File: cogs\deck_cog.py
-==================================================
-import discord
-from discord.ext import commands
-from discord import ui
-import cv2
-import numpy as np
-import aiohttp
-import io
-from urllib.parse import urlparse, parse_qs, urlunparse, urlencode
-import asyncio
-import sqlite3 # データベース操作のためにインポート
-
-# --- グローバル変数・定数 ---
-DB_FILE = "deck_data.db" # 保存するデータベースファイル名
-
-# --- データベース初期化関数 ---
-def init_database():
-    """データベースファイルとテーブルを初期化する"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    # decksテーブルを作成: user_idとdeck_urlを保存
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS decks (
-            user_id INTEGER NOT NULL,
-            deck_url TEXT NOT NULL,
-            PRIMARY KEY (user_id, deck_url)
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-# ユーザー操作用のView
-class DeckUserView(ui.View):
-    def __init__(self, cog):
-        super().__init__(timeout=None)
-        self.cog = cog
-
-    @ui.button(label="デッキ登録", style=discord.ButtonStyle.success, custom_id="deck_register_button")
-    async def register(self, interaction: discord.Interaction, button: ui.Button):
-        if not self.cog.registration_open:
-            await interaction.response.send_message("現在、デッキの登録は締め切られています。", ephemeral=True)
-            return
-        
-        # DBから登録数を取得して上限チェック
-        deck_count = await self.cog.db_get_user_deck_count(interaction.user.id)
-        if deck_count >= 2:
-            await interaction.response.send_message("デッキの登録は1人2つまでです。既存のデッキを削除してから再試行してください。", ephemeral=True)
-            return
-
-        await interaction.response.send_message("デッキのQRコードが写っている画像を、60秒以内に1つこのチャンネルに送信してください。", ephemeral=True)
-
-        def check(m):
-            return m.author == interaction.user and m.channel == interaction.channel and m.attachments
-
-        try:
-            msg = await self.cog.bot.wait_for('message', check=check, timeout=60.0)
-        except asyncio.TimeoutError:
-            await interaction.followup.send("タイムアウトしました。もう一度「デッキ登録」ボタンからやり直してください。", ephemeral=True)
-            return
-        
-        processing_msg = await interaction.followup.send("画像を処理中です...", ephemeral=True, wait=True)
-        await self.cog._process_deck_image(interaction, msg.attachments[0], processing_msg)
-        
-        try:
-            await msg.delete()
-        except (discord.Forbidden, discord.NotFound):
-            pass
-
-    @ui.button(label="登録確認", style=discord.ButtonStyle.primary, custom_id="deck_check_button")
-    async def check(self, interaction: discord.Interaction, button: ui.Button):
-        await self.cog.check_user_decks(interaction)
-
-    @ui.button(label="登録取消", style=discord.ButtonStyle.danger, custom_id="deck_cancel_button")
-    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
-        deleted_count = await self.cog.db_delete_user_decks(interaction.user.id)
-        if deleted_count > 0:
-            await interaction.response.send_message(f"登録済みのデッキ{deleted_count}件を全て取り消しました。", ephemeral=True)
-        else:
-            await interaction.response.send_message("登録済みのデッキはありません。", ephemeral=True)
-
-# 管理者操作用のView
-class DeckAdminView(ui.View):
-    def __init__(self, cog):
-        super().__init__(timeout=None)
-        self.cog = cog
-    
-    @ui.button(label="登録締切", style=discord.ButtonStyle.secondary, custom_id="deck_close_button")
-    async def close_registration(self, interaction: discord.Interaction, button: ui.Button):
-        self.cog.registration_open = False
-        await interaction.response.send_message("デッキの登録を締め切りました。", ephemeral=True)
-
-    @ui.button(label="受付再開", style=discord.ButtonStyle.secondary, custom_id="deck_reopen_button")
-    async def reopen_registration(self, interaction: discord.Interaction, button: ui.Button):
-        self.cog.registration_open = True
-        await interaction.response.send_message("デッキの登録を再開しました。", ephemeral=True)
-
-    @ui.button(label="登録発表", style=discord.ButtonStyle.primary, custom_id="deck_announce_button")
-    async def announce_decks(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.defer()
-        await self.cog.announce_all_decks(interaction.channel)
-        await interaction.followup.send("発表が完了しました。", ephemeral=True)
-
-    @ui.button(label="全登録削除", style=discord.ButtonStyle.danger, custom_id="deck_delete_all_button")
-    async def delete_all_registrations(self, interaction: discord.Interaction, button: ui.Button):
-        class ConfirmationView(ui.View):
-            def __init__(self, cog_ref):
-                super().__init__(timeout=30.0)
-                self.cog = cog_ref
-                self.message = None
-
-            async def on_timeout(self):
-                if self.message:
-                    try:
-                        await self.message.edit(content="タイムアウトしました。操作はキャンセルされました。", view=None)
-                    except discord.NotFound:
-                        pass
-
-            @ui.button(label="はい、全て削除します", style=discord.ButtonStyle.danger)
-            async def confirm_button(self, interaction: discord.Interaction, button: ui.Button):
-                await self.cog.db_delete_all_decks()
-                await interaction.response.edit_message(content="全てのデッキ登録を削除しました。", view=None)
-                self.stop()
-
-            @ui.button(label="いいえ", style=discord.ButtonStyle.secondary)
-            async def cancel_button(self, interaction: discord.Interaction, button: ui.Button):
-                await interaction.response.edit_message(content="操作はキャンセルされました。", view=None)
-                self.stop()
-
-        view = ConfirmationView(self.cog)
-        await interaction.response.send_message(
-            "**警告:** 本当に全てのデッキ登録を削除しますか？\nこの操作は元に戻せません。",
-            view=view,
-            ephemeral=True
-        )
-        view.message = await interaction.original_response()
-
-# Cogクラスの定義
-class DeckCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        self.registration_open = True
-        init_database() # Bot起動時にDBを初期化
-        bot.loop.create_task(self.register_views())
-
-    async def register_views(self):
-        await self.bot.wait_until_ready()
-        self.bot.add_view(DeckUserView(self))
-        self.bot.add_view(DeckAdminView(self))
-
-    # --- データベース操作メソッド ---
-    def _db_add_deck(self, user_id: int, deck_url: str):
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.execute("INSERT OR IGNORE INTO decks (user_id, deck_url) VALUES (?, ?)", (user_id, deck_url))
-
-    async def db_add_deck(self, user_id: int, deck_url: str):
-        await asyncio.to_thread(self._db_add_deck, user_id, deck_url)
-
-    def _db_get_user_decks(self, user_id: int) -> list[str]:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.execute("SELECT deck_url FROM decks WHERE user_id = ?", (user_id,))
-            return [row[0] for row in cursor.fetchall()]
-
-    async def db_get_user_decks(self, user_id: int) -> list[str]:
-        return await asyncio.to_thread(self._db_get_user_decks, user_id)
-
-    def _db_get_user_deck_count(self, user_id: int) -> int:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM decks WHERE user_id = ?", (user_id,))
-            return cursor.fetchone()[0]
-
-    async def db_get_user_deck_count(self, user_id: int) -> int:
-        return await asyncio.to_thread(self._db_get_user_deck_count, user_id)
-
-    def _db_delete_user_decks(self, user_id: int) -> int:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM decks WHERE user_id = ?", (user_id,))
-            return cursor.rowcount
-
-    async def db_delete_user_decks(self, user_id: int) -> int:
-        return await asyncio.to_thread(self._db_delete_user_decks, user_id)
-
-    def _db_get_all_decks(self) -> dict[int, list[str]]:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.execute("SELECT user_id, deck_url FROM decks ORDER BY user_id")
-            all_decks = {}
-            for user_id, deck_url in cursor.fetchall():
-                all_decks.setdefault(user_id, []).append(deck_url)
-            return all_decks
-
-    async def db_get_all_decks(self) -> dict[int, list[str]]:
-        return await asyncio.to_thread(self._db_get_all_decks)
-
-    def _db_delete_all_decks(self):
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.execute("DELETE FROM decks")
-
-    async def db_delete_all_decks(self):
-        await asyncio.to_thread(self._db_delete_all_decks)
-
-
-    # --- ヘルパー関数 ---
-    def _transform_deck_url(self, qr_url: str) -> str | None:
-        try:
-            if "shadowverse-wb.com" not in qr_url or "/ja/deck/detail/" not in qr_url:
-                return None
-            parsed_url = urlparse(qr_url)
-            query_params = parse_qs(parsed_url.query)
-            if 'hash' not in query_params: return None
-            hash_value = query_params['hash'][0]
-            new_query_params = {'hash': hash_value, 'lang': 'ja'}
-            return urlunparse(('https', 'shadowverse-wb.com', '/web/Image/deck', '', urlencode(new_query_params), ''))
-        except Exception as e:
-            print(f"URL transformation error: {e}")
-            return None
-
-    async def _process_deck_image(self, interaction: discord.Interaction, attachment: discord.Attachment, processing_msg: discord.WebhookMessage):
-        if not attachment.content_type or not attachment.content_type.startswith('image/'):
-            await processing_msg.edit(content="画像ファイルを添付してください。")
-            return
-        
-        try:
-            image_bytes = await attachment.read()
-            np_array = np.frombuffer(image_bytes, np.uint8)
-            img_color = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
-
-            if img_color is None:
-                await processing_msg.edit(content="画像の読み込みに失敗しました。")
-                return
-
-            detector = cv2.QRCodeDetector()
-            qr_data = None
-            
-            gray_img = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
-            
-            # 試行1: グレースケール
-            qr_data, _, _ = detector.detectAndDecode(gray_img)
-            # 試行2: 右上
-            if not qr_data:
-                h, w = gray_img.shape
-                qr_data, _, _ = detector.detectAndDecode(gray_img[0:h//2, w//2:w])
-            # 試行3: 二値化
-            if not qr_data:
-                _, binary_img = cv2.threshold(gray_img, 128, 255, cv2.THRESH_BINARY)
-                qr_data, _, _ = detector.detectAndDecode(binary_img)
-            # 試行4: 拡大
-            if not qr_data:
-                h, w = gray_img.shape
-                upscaled = cv2.resize(gray_img, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
-                qr_data, _, _ = detector.detectAndDecode(upscaled)
-
-            if not qr_data:
-                await processing_msg.edit(content="QRコードを検出できませんでした。")
-                return
-            
-            deck_image_url = self._transform_deck_url(qr_data)
-            if not deck_image_url:
-                await processing_msg.edit(content="読み取られたURLが正しくありません。")
-                return
-            
-            await self.db_add_deck(interaction.user.id, deck_image_url)
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(deck_image_url) as resp:
-                    if resp.status == 200:
-                        file = discord.File(io.BytesIO(await resp.read()), filename="deck.png")
-                        await processing_msg.edit(content="デッキを登録しました！", attachments=[file])
-                    else:
-                        await processing_msg.edit(content="デッキを登録しました！\n(確認画像の表示に失敗)")
-
-        except Exception as e:
-            print(f"Deck registration error: {e}")
-            await processing_msg.edit(content="デッキの登録中にエラーが発生しました。")
-
-    async def check_user_decks(self, interaction: discord.Interaction):
-        user_decks = await self.db_get_user_decks(interaction.user.id)
-        if not user_decks:
-            await interaction.response.send_message("登録済みのデッキはありません。", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        files_to_send = []
-        async with aiohttp.ClientSession() as session:
-            for i, url in enumerate(user_decks):
-                try:
-                    async with session.get(url) as resp:
-                        if resp.status == 200:
-                            files_to_send.append(discord.File(io.BytesIO(await resp.read()), filename=f"deck_{i+1}.png"))
-                except Exception as e:
-                    print(f"Error fetching deck image for check: {e}")
-        
-        if files_to_send:
-            await interaction.followup.send("あなたが登録したデッキはこちらです。", files=files_to_send, ephemeral=True)
-        else:
-            await interaction.followup.send("デッキ画像の取得に失敗しました。")
-
-    async def announce_all_decks(self, channel: discord.TextChannel):
-        all_decks = await self.db_get_all_decks()
-        if not all_decks:
-            await channel.send("登録されたデッキは1つもありません。")
-            return
-
-        await channel.send("--- 全員の登録デッキを発表します！ ---")
-        
-        for user_id, deck_urls in all_decks.items():
-            try:
-                user = await self.bot.fetch_user(user_id)
-                await channel.send(f"▼ {user.mention} さんのデッキ")
-                
-                files_to_send = []
-                async with aiohttp.ClientSession() as session:
-                    for i, url in enumerate(deck_urls):
-                        try:
-                            async with session.get(url) as resp:
-                                if resp.status == 200:
-                                    files_to_send.append(discord.File(io.BytesIO(await resp.read()), filename=f"{user.name}_deck_{i+1}.png"))
-                        except Exception as e:
-                             print(f"Error fetching deck image for announce: {e}")
-                
-                if files_to_send:
-                    await channel.send(files=files_to_send)
-                else:
-                    await channel.send("（デッキ画像の取得に失敗しました）")
-            except discord.NotFound:
-                await channel.send(f"ID: `{user_id}` のユーザーが見つかりませんでした。")
-            except Exception as e:
-                print(f"Announce error for user {user_id}: {e}")
-                await channel.send(f"ユーザーID: `{user_id}` のデッキ発表中にエラーが発生しました。")
-    
-    # --- コマンド ---
-    @commands.hybrid_command(name="deck_panel_user", description="ユーザー用のデッキ操作パネルを設置します。")
-    @commands.has_permissions(administrator=True)
-    async def deck_panel_user(self, ctx: commands.Context):
-        embed = discord.Embed(title="シャドウバース デッキ登録", description="下のボタンからデッキの登録・確認・取消を行ってください。", color=discord.Color.blue())
-        embed.add_field(name="登録ルール", value="・1人2デッキまで登録可能です。\n・登録を取り消すと、登録したデッキが全て削除されます。\n・デッキは1つずつ登録してください。")
-        await ctx.send(embed=embed, view=DeckUserView(self))
-    
-    @commands.hybrid_command(name="deck_panel_admin", description="管理者用の操作パネルを設置します。")
-    @commands.has_permissions(administrator=True)
-    async def deck_panel_admin(self, ctx: commands.Context):
-        embed = discord.Embed(title="管理者用パネル", description="下のボタンでデッキ登録の管理を行ってください。", color=discord.Color.dark_red())
-        await ctx.send(embed=embed, view=DeckAdminView(self))
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(DeckCog(bot))
-
-
-
-==================================================
-File: cogs\gemini_cog.py
-==================================================
-import os
-import asyncio
-import discord
-from discord.ext import commands
-import google.generativeai as genai
-import sqlite3
-import json
-import re  # 変更点: 正規表現ライブラリをインポート
-
-# --- 定数の定義 ---
-# Gemini APIキーを設定
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-# 変更点: AIへのシステムレベルの指示を定義
-SYSTEM_INSTRUCTION = "重要: あなたの回答は、簡潔にまとめてください。"
-
-# 変更点: モデルの初期化時にシステム指示を設定
-model = genai.GenerativeModel(
-    'gemini-2.5-flash',
-    system_instruction=SYSTEM_INSTRUCTION
-)
-
-# 会話履歴を保持する上限数を設定
-MAX_HISTORY = 10 
-
-# データベースファイルのパスを定数として定義
-DB_PATH = 'gemini_history.db'
-
-class GeminiCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self._init_db()
-
-    # --- データベース操作用のメソッド ---
-
-    def _init_db(self):
-        """データベースを初期化し、履歴保存用のテーブルを作成する。"""
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS chat_history (
-                    channel_id INTEGER PRIMARY KEY,
-                    history TEXT NOT NULL
-                )
-            ''')
-            conn.commit()
-        #print("GeminiCog: データベース接続とテーブルの準備が完了しました。")
-
-    def _serialize_history(self, history: list) -> str:
-        """会話履歴オブジェクトをJSON文字列に変換する。"""
-        serializable = [
-            {'role': content.role, 'parts': [part.text for part in content.parts]}
-            for content in history
-        ]
-        return json.dumps(serializable)
-
-    def _deserialize_history(self, json_str: str) -> list:
-        """JSON文字列から会話履歴リストを復元する。"""
-        if not json_str:
-            return []
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return []
-
-    def _load_history(self, channel_id: int) -> list:
-        """データベースから指定されたチャンネルの会話履歴を読み込む。"""
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT history FROM chat_history WHERE channel_id = ?", (channel_id,))
-            result = cursor.fetchone()
-            if result:
-                return self._deserialize_history(result[0])
-        return []
-
-    def _save_history(self, channel_id: int, history: list):
-        """指定されたチャンネルの会話履歴をデータベースに保存する。"""
-        serialized_history = self._serialize_history(history)
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT OR REPLACE INTO chat_history (channel_id, history)
-                VALUES (?, ?)
-            ''', (channel_id, serialized_history))
-            conn.commit()
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author == self.bot.user or message.mention_everyone or not self.bot.user.mentioned_in(message):
-            return
-
-        # 変更点: 正規表現を使ってメンションをより確実に除去
-        user_prompt = re.sub(f'^<@!?{self.bot.user.id}>\\s*', '', message.content).strip()
-        
-        # メンション削除後にメッセージが空になった場合は無視
-        if not user_prompt:
-            return
-
-        channel_id = message.channel.id
-        
-        history_data = self._load_history(channel_id)
-        chat = model.start_chat(history=history_data)
-        
-        if len(chat.history) > MAX_HISTORY:
-            chat.history = chat.history[-MAX_HISTORY:]
-            #print(f"チャンネル {channel_id} の会話履歴を最新{MAX_HISTORY // 2}往復に制限しました。")
-
-        # 変更点: `system_instruction` を利用するため、プロンプトの加工は不要
-        prompt = user_prompt
-        
-        try:
-            #print(f"プロンプト: {prompt}")
-            
-            response_stream = await chat.send_message_async(prompt, stream=True)
-            
-            buffer = ""
-            current_content = ""
-            sent_message = None
-            last_send_time = asyncio.get_event_loop().time()
-
-            async for chunk in response_stream:
-                buffer += chunk.text
-                current_time = asyncio.get_event_loop().time()
-
-                if len(buffer) > 200 or (current_time - last_send_time > 1.0 and buffer):
-                    new_content = current_content + buffer
-                    if not sent_message:
-                        sent_message = await message.reply(new_content)
-                    else:
-                        await sent_message.edit(content=new_content)
-                    
-                    current_content = new_content
-                    buffer = ""
-                    last_send_time = current_time
-
-            if buffer:
-                final_content = current_content + buffer
-                if not sent_message:
-                    await message.reply(final_content)
-                else:
-                    await sent_message.edit(content=final_content)
-
-            #print("ストリーミング返信完了。")
-
-            self._save_history(channel_id, chat.history)
-            #print(f"チャンネル {channel_id} の会話履歴をデータベースに保存しました。")
-
-        except Exception as e:
-            print(f"エラーが発生しました: {e}")
-            await message.reply(f"エラーが発生しました: {e}")
-
-async def setup(bot):
-    await bot.add_cog(GeminiCog(bot))
-
-==================================================
-File: cogs\music_cog.py
-==================================================
-# cogs/music_cog.py
-import asyncio
-import discord
-from discord.ext import commands
-import yt_dlp
-import logging
-import os
-from dotenv import load_dotenv
-
-# .envファイルから環境変数を読み込む
-load_dotenv()
-
-# ロギング（記録）の設定
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-class MusicCog(commands.Cog):
-    """YouTubeからの音楽再生を管理するCog"""
-
-    def __init__(self, bot):
-        self.bot = bot
-        self.music_queue = []
-        self.is_playing = False
-        self.current_song = None
-        self.voice_client = None
-        # .envファイルからFFmpegのパスを読み込む。見つからない場合は'ffmpeg'をデフォルト値とする。
-        self.ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
-
-        self.YDL_OPTIONS = {
-            'format': 'bestaudio[ext=opus]/bestaudio/best',
-            'noplaylist': True,
-            'quiet': True,
-            'default_search': 'auto',
-            'source_address': '0.0.0.0'
-        }
-        self.FFMPEG_OPTIONS = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-            'options': '-vn'
-        }
-
-    async def play_next_song(self, ctx):
-        """キュー内の次の曲を再生します。"""
-        if self.music_queue:
-            self.is_playing = True
-            video_info = self.music_queue.pop(0)
-            self.current_song = video_info
-
-            try:
-                # FFmpegの実行ファイルのパスを指定して音声ソースを作成
-                audio_source = discord.FFmpegPCMAudio(
-                    video_info['url'],
-                    executable=self.ffmpeg_path,
-                    before_options=self.FFMPEG_OPTIONS['before_options'],
-                    options=self.FFMPEG_OPTIONS['options']
-                )
-                self.voice_client.play(audio_source, after=lambda e: self.handle_after_play(e, ctx))
-                await ctx.send(f"**再生中:** {video_info['title']}")
-            except Exception as e:
-                logging.error(f"音声ソースの作成に失敗: {e}")
-                await ctx.send(f"音声の再生準備に失敗しました。Botのログを確認してください。")
-                self.is_playing = False
-                await self.play_next_song(ctx)
-        else:
-            self.is_playing = False
-            self.current_song = None
-            await asyncio.sleep(180) # 3分間待機
-            if not self.is_playing and self.voice_client and self.voice_client.is_connected():
-                await self.voice_client.disconnect()
-                await ctx.send("再生する曲がないためボイスチャンネルから切断しました。")
-
-    def handle_after_play(self, error, ctx):
-        """曲の再生が終了した後に呼び出される関数"""
-        if error:
-            logging.error(f'再生エラーが発生しました: {error}')
-            coro = ctx.send(f"再生中にエラーが発生しました: ```{error}```")
-            asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
-        
-        # 次の曲の再生を試みる
-        asyncio.run_coroutine_threadsafe(self.play_next_song(ctx), self.bot.loop)
-
-    @commands.command(name='join', aliases=['通話'], help='Botがボイスチャンネルに参加します。')
-    async def join(self, ctx):
-        if not ctx.author.voice:
-            return await ctx.send("このコマンドを使用するには、ボイスチャンネルに参加している必要があります。")
-        channel = ctx.author.voice.channel
-        if self.voice_client is not None:
-            await self.voice_client.move_to(channel)
-        else:
-            self.voice_client = await channel.connect()
-        await ctx.send(f"**{channel.name}** に接続しました。")
-
-    @commands.command(name='play', aliases=['p', '再生'], help='YouTubeで曲を検索し、キューに追加します。')
-    async def play(self, ctx, *, search: str):
-        if not self.voice_client:
-            if ctx.author.voice:
-                self.voice_client = await ctx.author.voice.channel.connect()
-            else:
-                return await ctx.send("音楽を再生するには、ボイスチャンネルに参加している必要があります。")
-        
-        await ctx.send(f"`{search}` を検索しています...")
-        try:
-            with yt_dlp.YoutubeDL(self.YDL_OPTIONS) as ydl:
-                info = ydl.extract_info(f"ytsearch:{search}", download=False)
-                if 'entries' not in info or not info['entries']:
-                    return await ctx.send("検索結果が見つかりませんでした。")
-                video = info['entries'][0]
-                video_info = { 'url': video['url'], 'title': video['title'], 'requester': ctx.author }
-                self.music_queue.append(video_info)
-                await ctx.send(f"**キューに追加しました:** {video_info['title']}")
-                if not self.is_playing:
-                    await self.play_next_song(ctx)
-        except Exception as e:
-            logging.error(f"再生コマンドでエラーが発生しました: {e}")
-            await ctx.send("曲の再生中にエラーが発生しました。")
-    
-    @commands.command(name='pause', aliases=['一時停止'], help='現在再生中の曲を一時停止します。')
-    async def pause(self, ctx):
-        if self.voice_client and self.voice_client.is_playing():
-            self.voice_client.pause()
-            await ctx.send("再生を一時停止しました。")
-        else:
-            await ctx.send("現在、再生中の曲はありません。")
-
-    @commands.command(name='resume', aliases=['再開'], help='一時停止中の曲を再開します。')
-    async def resume(self, ctx):
-        if self.voice_client and self.voice_client.is_paused():
-            self.voice_client.resume()
-            await ctx.send("再生を再開しました。")
-        else:
-            await ctx.send("一時停止中の曲はありません。")
-
-    @commands.command(name='stop', aliases=['停止'], help='音楽を停止し、キューを空にします。')
-    async def stop(self, ctx):
-        if self.voice_client:
-            self.music_queue.clear()
-            if self.voice_client.is_playing() or self.voice_client.is_paused():
-                self.voice_client.stop()
-                await ctx.send("再生を停止し、キューをクリアしました。")
-            else:
-                await ctx.send("現在、再生中の曲はありません。")
-        else:
-            await ctx.send("Botはボイスチャンネルに参加していません。")
-
-    @commands.command(name='skip', aliases=['s', 'スキップ'], help='現在再生中の曲をスキップします。')
-    async def skip(self, ctx):
-        if self.voice_client and self.voice_client.is_playing():
-            self.voice_client.stop()
-            await ctx.send("現在の曲をスキップしました。")
-        else:
-            await ctx.send("スキップする曲がありません。")
-            
-    @commands.command(name='queue', aliases=['q', '一覧'], help='現在のキュー（再生リスト）を表示します。')
-    async def queue(self, ctx):
-        if not self.music_queue and not self.current_song:
-            return await ctx.send("キューは空です。")
-        embed = discord.Embed(title="再生リスト", color=discord.Color.blue())
-        if self.current_song:
-            embed.add_field(name="再生中", value=f"**{self.current_song['title']}** (リクエスト: {self.current_song['requester'].mention})", inline=False)
-        if self.music_queue:
-            queue_list = ""
-            for i, song in enumerate(self.music_queue[:10]):
-                queue_list += f"{i+1}. **{song['title']}** (リクエスト: {song['requester'].mention})\n"
-            embed.add_field(name="次の曲", value=queue_list, inline=False)
-        if len(self.music_queue) > 10:
-            embed.set_footer(text=f"...さらに{len(self.music_queue) - 10}曲")
-        await ctx.send(embed=embed)
-
-    @commands.command(name='leave', aliases=['退出'], help='Botがボイスチャンネルから退出します。')
-    async def leave(self, ctx):
-        if self.voice_client and self.voice_client.is_connected():
-            await self.voice_client.disconnect()
-            self.music_queue.clear()
-            self.is_playing = False
-            self.current_song = None
-            self.voice_client = None
-            await ctx.send("ボイスチャンネルから切断しました。")
-        else:
-            await ctx.send("Botはボイスチャンネルに参加していません。")
-
-
-async def setup(bot):
-    await bot.add_cog(MusicCog(bot))
-
-
-==================================================
-File: cogs\reaction_cog.py
-==================================================
-import discord
-from discord.ext import commands
-import asyncio
-
-# リアクションのトリガーと、それに対応するリアクションのリストをマッピングで管理します。
-# ここに新しいトリガーとリアクションの組み合わせを追加するだけで、機能拡張ができます。
-REACTION_MAP = {
-    # ⭐ が押されたら、クラス絵文字を順番に追加
-    "⭐": [
-        discord.PartialEmoji(name="Class_Forestcraft", id=922142168473301082),
-        discord.PartialEmoji(name="Class_Swordcraft", id=922142203323744296),
-        discord.PartialEmoji(name="Class_Runecraft", id=922142232595791953),
-        discord.PartialEmoji(name="Class_Dragoncraft", id=922142264942284830),
-        discord.PartialEmoji(name="Class_Abysscraft", id=1410146572930519040),
-        discord.PartialEmoji(name="Class_Havencraft", id=922142398073700433),
-        discord.PartialEmoji(name="Class_Portalcraft", id=922142424380346399),
-    ],
-    # ✅ が押されたら、⭕ と ❌ を追加 (Unicode絵文字もそのまま使えます)
-    "✅": ["⭕", "❌"],
-}
-
-
-class ReactionCog(commands.Cog):
-    """
-    特定のリアクションやメッセージをトリガーにして、リアクションを追加するCog
-    """
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        """
-        メッセージが送信されたときに呼び出されるイベントリスナー
-        @everyone を含むメッセージに特定の絵文字でリアクションします。
-        """
-        # Bot自身のメッセージは無視する
-        if message.author == self.bot.user:
-            return
-
-        # メッセージに @everyone が含まれている場合
-        if "@everyone" in message.content:
-            try:
-                # 指定されたカスタム絵文字でリアクション
-                await message.add_reaction("<:Mimashita:1425853002392272999>")
-            except discord.Forbidden:
-                # リアクション追加の権限がない場合
-                print(f"リアクションの追加権限がありません: channel_id={message.channel.id}")
-            except discord.HTTPException as e:
-                # 絵文字が見つからない、またはその他のHTTPエラー
-                print(f"リアクション追加中にHTTPエラー: {e}")
-            except Exception as e:
-                print(f"リアクション追加中に予期せぬエラー: {e}")
-
-
-    @commands.Cog.listener()
-    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
-        """
-        リアクションが追加されたときに呼び出されるイベントリスナー
-        on_reaction_add と違い、Botが起動する前のメッセージにも対応できます
-        """
-        # リアクションを追加したのがBot自身の場合は無視する
-        if payload.user_id == self.bot.user.id:
-            return
-
-        # トリガーとなる絵文字がマップに存在するか確認
-        trigger_emoji = str(payload.emoji)
-        if trigger_emoji not in REACTION_MAP:
-            return
-
-        # 対応するリアクションリストを取得
-        reactions_to_add = REACTION_MAP[trigger_emoji]
-
-        # リアクションが付けられたチャンネルとメッセージを取得
-        try:
-            channel = self.bot.get_channel(payload.channel_id)
-            if not channel or not isinstance(channel, discord.TextChannel):
-                return # DMなど、テキストチャンネル以外は無視
-            message = await channel.fetch_message(payload.message_id)
-        except discord.NotFound:
-            # メッセージが見つからない場合は何もしない
-            print(f"メッセージが見つかりませんでした: {payload.message_id}")
-            return
-        except discord.Forbidden:
-            # チャンネルにアクセス権がない場合は何もしない
-            print(f"チャンネルにアクセスできません: {payload.channel_id}")
-            return
-        except Exception as e:
-            print(f"メッセージ取得中に予期せぬエラー: {e}")
-            return
-
-        # 定義された絵文字リストを順番にリアクションとして追加
-        try:
-            for emoji in reactions_to_add:
-                await message.add_reaction(emoji)
-                # リアクションが早すぎると順番が分かりにくいため、少し待機する
-                await asyncio.sleep(0.5)
-        except discord.Forbidden:
-            # リアクション追加の権限がない場合
-            print(f"リアクションの追加権限がありません: channel_id={payload.channel_id}")
-        except Exception as e:
-            print(f"リアクション追加中にエラー: {e}")
-
-
-async def setup(bot: commands.Bot):
-    """
-    BotにCogを登録するためのセットアップ関数
-    """
-    await bot.add_cog(ReactionCog(bot))
-    #print("ReactionCogが正常にロードされました。")
-
-
-==================================================
-File: cogs\room_match_cog.py
-==================================================
-import discord
-from discord.ext import commands
-from discord.ui import View, Button, button
-import os
-
-# .envファイルから読み込む環境変数名
-ROOM_MATCH_CHANNEL_ID_ENV = "ROOM_MATCH_CHANNEL_ID"
-
-# --- ボタンが押されたときの処理を定義する永続View ---
-class RoomMatchPersistentView(View):
-    def __init__(self, target_channel_id: int):
-        super().__init__(timeout=None)
-        # 募集メッセージを送信するチャンネルIDを保持
-        self.target_channel_id = target_channel_id
-
-    @button(label="@everyoneでルムマ募集", style=discord.ButtonStyle.primary, custom_id="persistent_view:room_match_separate_channel")
-    async def room_match_button(self, interaction: discord.Interaction, button: Button):
-        # 保持しているIDから、募集メッセージを送信するチャンネルを取得
-        target_channel = interaction.guild.get_channel(self.target_channel_id)
-
-        # チャンネルが見つからない場合のエラー処理
-        if not target_channel:
-            await interaction.response.send_message(
-                "❌ エラー: 募集メッセージを送信するチャンネルが見つかりませんでした。\nBot管理者に連絡してください。",
-                ephemeral=True
-            )
-            return
-
-        # ボタンを押したユーザーとメンション設定
-        # user.display_name を使用してサーバープロフィール名を取得
-        user_display_name = interaction.user.display_name
-        allowed_mentions = discord.AllowedMentions(everyone=True)
-        
-        # ★★★ ここが変更点です ★★★
-        message_content = f"@everyone **{user_display_name}** さんがルームマッチを募集しています！"
-
-        try:
-            # 指定されたチャンネルに募集メッセージを送信
-            await target_channel.send(content=message_content, allowed_mentions=allowed_mentions)
-            # ボタンを押した本人にだけ確認メッセージを送信
-            await interaction.response.send_message(
-                f"✅ {target_channel.mention} にルームマッチの募集を送信しました。",
-                ephemeral=True,
-                delete_after=15 # 15秒後に自動で消える
-            )
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                f"❌ エラー: {target_channel.mention} にメッセージを送信する権限がありません。",
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.response.send_message(f"❌ 不明なエラーが発生しました: {e}", ephemeral=True)
-
-
-# --- Cogクラスの定義 ---
-class RoomMatchCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        self.target_channel_id = None
-        # .envからチャンネルIDを読み込む
-        try:
-            # 環境変数からIDを取得し、整数に変換
-            self.target_channel_id = int(os.getenv(ROOM_MATCH_CHANNEL_ID_ENV))
-        except (TypeError, ValueError):
-            # .envに設定がない、または値が不正な場合は警告を出力
-            print(f"⚠️  警告: 環境変数 '{ROOM_MATCH_CHANNEL_ID_ENV}' が.envファイルに設定されていないか、値が無効です。")
-
-        # チャンネルIDが正常に読み込めた場合のみ、永続ViewをBotに登録
-        if self.target_channel_id:
-            self.bot.add_view(RoomMatchPersistentView(self.target_channel_id))
-
-    # --- プレフィックスコマンドの定義 ---
-    @commands.command(name="ルムマ募集パネル設置")
-    @commands.has_permissions(manage_channels=True) # 「チャンネルの管理」権限を持つユーザーのみ実行可能
-    async def create_room_match_panel(self, ctx: commands.Context):
-        # Cog初期化時にチャンネルIDが読み込めていなければエラーメッセージを返す
-        if not self.target_channel_id:
-            await ctx.send("❌ エラー: 募集メッセージを送信するチャンネルが設定されていません。`.env`ファイルを確認してください。")
-            return
-
-        # IDからチャンネルオブジェクトを取得
-        target_channel = self.bot.get_channel(self.target_channel_id)
-        if not target_channel:
-            await ctx.send(f"❌ エラー: 指定されたID `{self.target_channel_id}` のチャンネルが見つかりません。IDが正しいか確認してください。")
-            return
-
-        # パネルの埋め込みメッセージを作成
-        embed = discord.Embed(
-            title="ルームマッチ募集パネル",
-            description=f"下のボタンを押すと、{target_channel.mention} に `@everyone` メンション付きでルームマッチの募集ができます。",
-            color=discord.Color.blue()
-        )
-        
-        # ViewにターゲットチャンネルIDを渡してメッセージを送信
-        await ctx.send(embed=embed, view=RoomMatchPersistentView(self.target_channel_id))
-
-    # --- コマンドのエラーハンドリング ---
-    @create_room_match_panel.error
-    async def create_room_match_panel_error(self, ctx: commands.Context, error: commands.CommandError):
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.send("❌ このコマンドを実行するには`チャンネルの管理`権限が必要です。")
-        else:
-            await ctx.send(f"❌ コマンド実行中にエラーが発生しました: {error}")
-            print(f"コマンドエラー: {error}")
-
-
-# --- BotにCogを登録するためのsetup関数 ---
-async def setup(bot: commands.Bot):
-    await bot.add_cog(RoomMatchCog(bot))
 
 ==================================================
 File: cogs\shadowverse_cog.py
@@ -1908,232 +994,194 @@ async def setup(bot: commands.Bot):
 
 
 ==================================================
-File: cogs\shadowverse_panel_cog.py
+File: cogs\audio\music.py
 ==================================================
+# cogs/music_cog.py
+import asyncio
 import discord
 from discord.ext import commands
-from discord import ui
-import pandas as pd
+import yt_dlp
+import logging
 import os
-import asyncio
-import sqlite3 # SQLiteを扱うためにインポート
+from dotenv import load_dotenv
 
-# --- 定数 ---
-DB_FILE = "user_data.db"  # データベースファイルの名前
-TARGET_CATEGORY_ID = 1003574017900417094 # 通知先として選択できるチャンネルが含まれるカテゴリID
+# .envファイルから環境変数を読み込む
+load_dotenv()
 
-# --- データベース管理クラス ---
-class DatabaseManager:
-    """SQLiteデータベースを管理し、ユーザー設定を永続化するクラス"""
-    def __init__(self, db_path=DB_FILE):
-        self.db_path = db_path
-        self._setup_database()
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """DB接続を取得"""
-        return sqlite3.connect(self.db_path)
-
-    def _setup_database(self):
-        """テーブルが存在しない場合に自動で作成する"""
-        with self._get_connection() as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS sv_channel_settings (
-                    user_id INTEGER PRIMARY KEY,
-                    channel_id INTEGER NOT NULL
-                )
-            ''')
-            conn.commit()
-
-    # --- 同期メソッド (裏側で実行) ---
-    def _set_channel_sync(self, user_id: int, channel_id: int):
-        with self._get_connection() as conn:
-            conn.execute("INSERT OR REPLACE INTO sv_channel_settings (user_id, channel_id) VALUES (?, ?)", (user_id, channel_id))
-
-    def _get_channel_sync(self, user_id: int) -> int | None:
-        with self._get_connection() as conn:
-            cursor = conn.execute("SELECT channel_id FROM sv_channel_settings WHERE user_id = ?", (user_id,))
-            result = cursor.fetchone()
-            return result[0] if result else None
-
-    def _clear_channel_sync(self, user_id: int):
-        with self._get_connection() as conn:
-            conn.execute("DELETE FROM sv_channel_settings WHERE user_id = ?", (user_id,))
-
-    # --- 非同期メソッド (Cogから呼び出す用) ---
-    async def set_user_channel(self, user_id: int, channel_id: int):
-        await asyncio.to_thread(self._set_channel_sync, user_id, channel_id)
-
-    async def get_user_channel(self, user_id: int) -> int | None:
-        return await asyncio.to_thread(self._get_channel_sync, user_id)
-
-    async def clear_user_channel(self, user_id: int):
-        await asyncio.to_thread(self._clear_channel_sync, user_id)
+# ロギング（記録）の設定
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-# --- UIコンポーネント (View, Modalなど) ---
-# 元のCogからUIパーツをインポート
-try:
-    from .shadowverse_cog import (
-        ManualRecordView, ConfirmDeleteView, get_stats_summary, get_recent_matches
-    )
-except ImportError:
-    # 依存関係のエラーを防ぐためのフォールバック
-    class ManualRecordView(ui.View): pass
-    class ConfirmDeleteView(ui.View): pass
-    def get_stats_summary(user_id, period): return discord.Embed(title="Error")
-    def get_recent_matches(user_id, count): return discord.Embed(title="Error")
+class MusicCog(commands.Cog):
+    """YouTubeからの音楽再生を管理するCog"""
 
-
-class ChannelSelectView(ui.View):
-    def __init__(self, channels: list[discord.TextChannel], author_id: int, db_manager: DatabaseManager):
-        super().__init__(timeout=120.0)
-        self.author_id = author_id
-        self.db_manager = db_manager
-        options = [
-            discord.SelectOption(label=ch.name, value=str(ch.id)) for ch in channels[:25]
-        ]
-        self.select_menu = ui.Select(placeholder="通知先にしたいチャンネルを選択してください...", options=options)
-        self.select_menu.callback = self.on_select_submit
-        self.add_item(self.select_menu)
-
-    async def on_select_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        selected_channel_id = int(interaction.data["values"][0])
-        await self.db_manager.set_user_channel(interaction.user.id, selected_channel_id)
-        selected_channel = interaction.guild.get_channel(selected_channel_id)
-        for item in self.children: item.disabled = True
-        await interaction.edit_original_response(
-            content=f"✅ 通知チャンネルを **{selected_channel.mention}** に設定しました。", view=self
-        )
-        self.stop()
-    
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("この操作はコマンドを実行した本人しか行えません。", ephemeral=True)
-            return False
-        return True
-
-# (以降のView, ModalもDBマネージャーを使うように修正済み)
-class StatsPeriodSelectView(ui.View):
-    def __init__(self, author_id: int, bot_instance: commands.Bot, db_manager: DatabaseManager):
-        super().__init__(timeout=60)
-        self.author_id = author_id; self.bot = bot_instance; self.db_manager = db_manager
-    @ui.select(placeholder="集計期間を選択してください...",options=[discord.SelectOption(label="本日", value="today"), discord.SelectOption(label="昨日", value="yesterday"), discord.SelectOption(label="一週間", value="week"), discord.SelectOption(label="全期間", value="all")])
-    async def select_period(self, interaction: discord.Interaction, select: ui.Select):
-        selected_period = select.values[0]
-        await interaction.response.edit_message(content="統計を生成しています...", view=None)
-        embed = await asyncio.to_thread(get_stats_summary, interaction.user.id, selected_period)
-        target_channel_id = await self.db_manager.get_user_channel(interaction.user.id)
-        target_channel = self.bot.get_channel(target_channel_id) if target_channel_id else None
-        if target_channel:
-            try:
-                await target_channel.send(embed=embed)
-                await interaction.followup.send(f"✅ 結果を {target_channel.mention} に送信しました。", ephemeral=True)
-            except discord.Forbidden: await interaction.followup.send(f"❌ 設定されたチャンネル {target_channel.mention} にメッセージを送信する権限がありません。", ephemeral=True)
-        else: await interaction.followup.send(embed=embed)
-
-class HistoryCountModal(ui.Modal, title="履歴の表示件数"):
-    def __init__(self, bot_instance: commands.Bot, db_manager: DatabaseManager):
-        super().__init__(); self.bot = bot_instance; self.db_manager = db_manager
-    count_input = ui.TextInput(label="表示する件数を入力してください", placeholder="1～25の半角数字で入力...", min_length=1, max_length=2)
-    async def on_submit(self, interaction: discord.Interaction):
-        if not self.count_input.value.isdigit() or not (1 <= int(self.count_input.value) <= 25): return await interaction.response.send_message("❌ 1から25までの半角数字を入力してください。", ephemeral=True)
-        count = int(self.count_input.value)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        embed = await asyncio.to_thread(get_recent_matches, interaction.user.id, count)
-        target_channel_id = await self.db_manager.get_user_channel(interaction.user.id)
-        target_channel = self.bot.get_channel(target_channel_id) if target_channel_id else None
-        if target_channel:
-            try:
-                await target_channel.send(embed=embed)
-                await interaction.followup.send(f"✅ 結果を {target_channel.mention} に送信しました。", ephemeral=True)
-            except discord.Forbidden: await interaction.followup.send(f"❌ 設定されたチャンネル {target_channel.mention} にメッセージを送信する権限がありません。", ephemeral=True)
-        else: await interaction.followup.send(embed=embed)
-
-class ShadowversePersistentPanel(ui.View):
-    def __init__(self, bot_instance: commands.Bot, db_manager: DatabaseManager):
-        super().__init__(timeout=None); self.bot = bot_instance; self.db_manager = db_manager
-    @ui.button(label="手動登録", style=discord.ButtonStyle.success, custom_id="sv_panel:record")
-    async def record(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_message(embed=ManualRecordView(author_id=interaction.user.id).create_embed(), view=ManualRecordView(author_id=interaction.user.id), ephemeral=True)
-    @ui.button(label="戦績表示", style=discord.ButtonStyle.primary, custom_id="sv_panel:stats")
-    async def stats(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_message("どの期間の戦績サマリーを表示しますか？", view=StatsPeriodSelectView(author_id=interaction.user.id, bot_instance=self.bot, db_manager=self.db_manager), ephemeral=True)
-    @ui.button(label="直近履歴", style=discord.ButtonStyle.secondary, custom_id="sv_panel:history")
-    async def history(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_modal(HistoryCountModal(bot_instance=self.bot, db_manager=self.db_manager))
-    @ui.button(label="⚙️ 通知チャンネル設定", style=discord.ButtonStyle.secondary, custom_id="sv_panel:set_channel", row=1)
-    async def set_channel(self, interaction: discord.Interaction, button: ui.Button):
-        category = self.bot.get_channel(TARGET_CATEGORY_ID)
-        if not category or not isinstance(category, discord.CategoryChannel): return await interaction.response.send_message(f"❌ 対象カテゴリが見つかりません。", ephemeral=True)
-        text_channels = category.text_channels
-        if not text_channels: return await interaction.response.send_message(f"❌ カテゴリ内に選択可能なチャンネルがありません。", ephemeral=True)
-        await interaction.response.send_message("通知先に設定したいチャンネルを以下から選択してください:", view=ChannelSelectView(channels=text_channels, author_id=interaction.user.id, db_manager=self.db_manager), ephemeral=True)
-    @ui.button(label="全データ削除", style=discord.ButtonStyle.danger, custom_id="sv_panel:delete", row=1)
-    async def delete(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_message("本当にあなたの全ての戦績データを削除しますか？", view=ConfirmDeleteView(author_id=interaction.user.id), ephemeral=True)
-
-
-# --- メインのCogクラス ---
-class ShadowversePanelCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot):
         self.bot = bot
-        # Cog初期化時にDBマネージャーをインスタンス化
-        self.db_manager = DatabaseManager()
-        # Bot起動時に永続Viewを登録
-        self.bot.add_view(ShadowversePersistentPanel(bot, self.db_manager))
+        self.music_queue = []
+        self.is_playing = False
+        self.current_song = None
+        self.voice_client = None
+        # .envファイルからFFmpegのパスを読み込む。見つからない場合は'ffmpeg'をデフォルト値とする。
+        self.ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
 
-    @commands.command(name="svパネル設置")
-    @commands.has_permissions(manage_channels=True)
-    async def create_sv_panel(self, ctx: commands.Context):
-        """シャドウバース戦績管理用のボタンパネルを設置します。"""
-        embed = discord.Embed(
-            title="⚔️ シャドウバース 戦績管理パネル ⚔️",
-            description=(
-                "**⚠️ まずはじめに、`⚙️ 通知チャンネル設定` ボタンから結果を投稿する個人チャンネルを設定してください。**\n\n"
-                "設定が完了したら、下の各ボタンから戦績の記録や確認ができます。\n\n"
-                "📸 **リプレイ画像からの登録**は、引き続き `/replay` をご利用ください。"
-            ),
-            color=discord.Color.purple()
-        )
-        await ctx.send(embed=embed, view=ShadowversePersistentPanel(self.bot, self.db_manager))
+        self.YDL_OPTIONS = {
+            'format': 'bestaudio[ext=opus]/bestaudio/best',
+            'noplaylist': True,
+            'quiet': True,
+            'default_search': 'auto',
+            'source_address': '0.0.0.0'
+        }
+        self.FFMPEG_OPTIONS = {
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'options': '-vn'
+        }
 
-    # --- `!svchannel` コマンド群をこのCogに統合 ---
-    @commands.group(name="svchannel", invoke_without_command=True)
-    async def svchannel(self, ctx: commands.Context):
-        """個人通知チャンネルの管理コマンド"""
-        await ctx.send(
-            "**個人通知チャンネル管理コマンド**\n"
-            "・通知チャンネルの設定は、戦績管理パネルの `⚙️ 通知チャンネル設定` ボタンから行えます。\n\n"
-            "`!svchannel view`: 現在設定されている通知先チャンネルを確認します。\n"
-            "`!svchannel clear`: 通知先の設定を解除します。"
-        )
+    async def play_next_song(self, ctx):
+        """キュー内の次の曲を再生します。"""
+        if self.music_queue:
+            self.is_playing = True
+            video_info = self.music_queue.pop(0)
+            self.current_song = video_info
 
-    @svchannel.command(name="view")
-    async def view_channel(self, ctx: commands.Context):
-        """現在設定されている通知先チャンネルを確認します。"""
-        channel_id = await self.db_manager.get_user_channel(ctx.author.id)
-        if channel_id:
-            target_channel = self.bot.get_channel(channel_id)
-            if target_channel:
-                await ctx.send(f"ℹ️ あなたの通知チャンネルは **{target_channel.mention}** に設定されています。")
-            else:
-                await ctx.send(f"⚠️ あなたの通知チャンネル (ID: `{channel_id}`) が見つかりませんでした。")
+            try:
+                # FFmpegの実行ファイルのパスを指定して音声ソースを作成
+                audio_source = discord.FFmpegPCMAudio(
+                    video_info['url'],
+                    executable=self.ffmpeg_path,
+                    before_options=self.FFMPEG_OPTIONS['before_options'],
+                    options=self.FFMPEG_OPTIONS['options']
+                )
+                self.voice_client.play(audio_source, after=lambda e: self.handle_after_play(e, ctx))
+                await ctx.send(f"**再生中:** {video_info['title']}")
+            except Exception as e:
+                logging.error(f"音声ソースの作成に失敗: {e}")
+                await ctx.send(f"音声の再生準備に失敗しました。Botのログを確認してください。")
+                self.is_playing = False
+                await self.play_next_song(ctx)
         else:
-            await ctx.send("ℹ️ あなたの通知チャンネルはまだ設定されていません。")
+            self.is_playing = False
+            self.current_song = None
+            await asyncio.sleep(180) # 3分間待機
+            if not self.is_playing and self.voice_client and self.voice_client.is_connected():
+                await self.voice_client.disconnect()
+                await ctx.send("再生する曲がないためボイスチャンネルから切断しました。")
 
-    @svchannel.command(name="clear")
-    async def clear_channel(self, ctx: commands.Context):
-        """通知先チャンネルの設定を解除します。"""
-        await self.db_manager.clear_user_channel(ctx.author.id)
-        await ctx.send("✅ 通知チャンネルの設定を解除しました。")
+    def handle_after_play(self, error, ctx):
+        """曲の再生が終了した後に呼び出される関数"""
+        if error:
+            logging.error(f'再生エラーが発生しました: {error}')
+            coro = ctx.send(f"再生中にエラーが発生しました: ```{error}```")
+            asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
+        
+        # 次の曲の再生を試みる
+        asyncio.run_coroutine_threadsafe(self.play_next_song(ctx), self.bot.loop)
+
+    @commands.command(name='join', aliases=['通話'], help='Botがボイスチャンネルに参加します。')
+    async def join(self, ctx):
+        if not ctx.author.voice:
+            return await ctx.send("このコマンドを使用するには、ボイスチャンネルに参加している必要があります。")
+        channel = ctx.author.voice.channel
+        if self.voice_client is not None:
+            await self.voice_client.move_to(channel)
+        else:
+            self.voice_client = await channel.connect()
+        await ctx.send(f"**{channel.name}** に接続しました。")
+
+    @commands.command(name='play', aliases=['p', '再生'], help='YouTubeで曲を検索し、キューに追加します。')
+    async def play(self, ctx, *, search: str):
+        if not self.voice_client:
+            if ctx.author.voice:
+                self.voice_client = await ctx.author.voice.channel.connect()
+            else:
+                return await ctx.send("音楽を再生するには、ボイスチャンネルに参加している必要があります。")
+        
+        await ctx.send(f"`{search}` を検索しています...")
+        try:
+            with yt_dlp.YoutubeDL(self.YDL_OPTIONS) as ydl:
+                info = ydl.extract_info(f"ytsearch:{search}", download=False)
+                if 'entries' not in info or not info['entries']:
+                    return await ctx.send("検索結果が見つかりませんでした。")
+                video = info['entries'][0]
+                video_info = { 'url': video['url'], 'title': video['title'], 'requester': ctx.author }
+                self.music_queue.append(video_info)
+                await ctx.send(f"**キューに追加しました:** {video_info['title']}")
+                if not self.is_playing:
+                    await self.play_next_song(ctx)
+        except Exception as e:
+            logging.error(f"再生コマンドでエラーが発生しました: {e}")
+            await ctx.send("曲の再生中にエラーが発生しました。")
+    
+    @commands.command(name='pause', aliases=['一時停止'], help='現在再生中の曲を一時停止します。')
+    async def pause(self, ctx):
+        if self.voice_client and self.voice_client.is_playing():
+            self.voice_client.pause()
+            await ctx.send("再生を一時停止しました。")
+        else:
+            await ctx.send("現在、再生中の曲はありません。")
+
+    @commands.command(name='resume', aliases=['再開'], help='一時停止中の曲を再開します。')
+    async def resume(self, ctx):
+        if self.voice_client and self.voice_client.is_paused():
+            self.voice_client.resume()
+            await ctx.send("再生を再開しました。")
+        else:
+            await ctx.send("一時停止中の曲はありません。")
+
+    @commands.command(name='stop', aliases=['停止'], help='音楽を停止し、キューを空にします。')
+    async def stop(self, ctx):
+        if self.voice_client:
+            self.music_queue.clear()
+            if self.voice_client.is_playing() or self.voice_client.is_paused():
+                self.voice_client.stop()
+                await ctx.send("再生を停止し、キューをクリアしました。")
+            else:
+                await ctx.send("現在、再生中の曲はありません。")
+        else:
+            await ctx.send("Botはボイスチャンネルに参加していません。")
+
+    @commands.command(name='skip', aliases=['s', 'スキップ'], help='現在再生中の曲をスキップします。')
+    async def skip(self, ctx):
+        if self.voice_client and self.voice_client.is_playing():
+            self.voice_client.stop()
+            await ctx.send("現在の曲をスキップしました。")
+        else:
+            await ctx.send("スキップする曲がありません。")
+            
+    @commands.command(name='queue', aliases=['q', '一覧'], help='現在のキュー（再生リスト）を表示します。')
+    async def queue(self, ctx):
+        if not self.music_queue and not self.current_song:
+            return await ctx.send("キューは空です。")
+        embed = discord.Embed(title="再生リスト", color=discord.Color.blue())
+        if self.current_song:
+            embed.add_field(name="再生中", value=f"**{self.current_song['title']}** (リクエスト: {self.current_song['requester'].mention})", inline=False)
+        if self.music_queue:
+            queue_list = ""
+            for i, song in enumerate(self.music_queue[:10]):
+                queue_list += f"{i+1}. **{song['title']}** (リクエスト: {song['requester'].mention})\n"
+            embed.add_field(name="次の曲", value=queue_list, inline=False)
+        if len(self.music_queue) > 10:
+            embed.set_footer(text=f"...さらに{len(self.music_queue) - 10}曲")
+        await ctx.send(embed=embed)
+
+    @commands.command(name='leave', aliases=['退出'], help='Botがボイスチャンネルから退出します。')
+    async def leave(self, ctx):
+        if self.voice_client and self.voice_client.is_connected():
+            await self.voice_client.disconnect()
+            self.music_queue.clear()
+            self.is_playing = False
+            self.current_song = None
+            self.voice_client = None
+            await ctx.send("ボイスチャンネルから切断しました。")
+        else:
+            await ctx.send("Botはボイスチャンネルに参加していません。")
 
 
-async def setup(bot: commands.Bot):
-    await bot.add_cog(ShadowversePanelCog(bot))
+async def setup(bot):
+    await bot.add_cog(MusicCog(bot))
+
 
 ==================================================
-File: cogs\voice_logger_cog.py
+File: cogs\audio\voice_logger.py
 ==================================================
 import discord
 from discord.ext import commands, tasks
@@ -2146,7 +1194,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- 環境変数から設定を読み込み ---
-DB_FILE = os.getenv("DB_FILE", "voice_log.db")
+DB_FILE = os.getenv("DB_FILE", "data/voice_log.db")
 
 class VoiceLoggerCog(commands.Cog):
     # JSTタイムゾーンをクラス変数として定義
@@ -2705,7 +1753,7 @@ async def setup(bot):
 
 
 ==================================================
-File: cogs\event_manager\cog.py
+File: cogs\events\event_manager\cog.py
 ==================================================
 # cogs/tournament/cog.py
 import discord
@@ -2731,7 +1779,7 @@ log = logging.getLogger(__name__)
 class EventManagerCog(commands.Cog, name="EventManager"):
     def __init__(self, bot):
         self.bot = bot
-        self.db = DatabaseManager('tournaments.db')
+        self.db = DatabaseManager('data/tournaments.db')
         self.recruit_sessions: Dict[int, dict] = {}
         self.swiss_tournaments: Dict[int, SwissTournament] = {}
         self.locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -3377,7 +2425,7 @@ async def setup(bot):
 
 
 ==================================================
-File: cogs\event_manager\database.py
+File: cogs\events\event_manager\database.py
 ==================================================
 # cogs/event_manager/database.py
 import sqlite3
@@ -3526,7 +2574,7 @@ class DatabaseManager:
 
 
 ==================================================
-File: cogs\event_manager\image_utils.py
+File: cogs\events\event_manager\image_utils.py
 ==================================================
 # cogs/tournament/image_utils.py
 import discord
@@ -3563,7 +2611,7 @@ def create_bracket_image_from_db(guild_id: int, db: DatabaseManager) -> discord.
     # ▲▲▲ 修正ここまで ▲▲▲
 
     try:
-        font = ImageFont.truetype("meiryo.ttc", font_size)
+        font = ImageFont.truetype("assets/meiryo.ttc", font_size)
     except IOError:
         font = ImageFont.load_default()
 
@@ -3654,7 +2702,7 @@ def create_bracket_image_from_db(guild_id: int, db: DatabaseManager) -> discord.
     return discord.File(buffer, filename="tournament_bracket.png")
 
 ==================================================
-File: cogs\event_manager\models.py
+File: cogs\events\event_manager\models.py
 ==================================================
 # cogs/tournament/models.py
 import discord
@@ -3787,7 +2835,7 @@ class SwissTournament:
         return any({r[0], r[1]} == {p1_id, p2_id} for r in self.reported_matches_this_round)
 
 ==================================================
-File: cogs\event_manager\views.py
+File: cogs\events\event_manager\views.py
 ==================================================
 # cogs/tournament/views.py
 import discord
@@ -4052,12 +3100,12 @@ class SwissResultReportView(discord.ui.View):
             await cog._handle_swiss_undo_logic(interaction, guild_id, p1_id, p2_id)
 
 ==================================================
-File: cogs\event_manager\__init__.py
+File: cogs\events\event_manager\__init__.py
 ==================================================
 
 
 ==================================================
-File: cogs\roundrobin\cog.py
+File: cogs\events\roundrobin\cog.py
 ==================================================
 # cogs/roundrobin/cog.py
 import discord
@@ -4068,8 +3116,8 @@ from dotenv import load_dotenv
 import sqlite3
 import functools # functoolsをインポート
 
-from cogs.event_manager.database import DatabaseManager
-from cogs.event_manager.models import DummyPlayer
+from cogs.events.event_manager.database import DatabaseManager
+from cogs.events.event_manager.models import DummyPlayer
 from .rr_views import RegistrationView
 from .rr_models import RR_Team
 from . import rr_logic, rr_handlers, rr_roles
@@ -4080,7 +3128,7 @@ class RoundRobinCog(commands.Cog, name="RoundRobin"):
     """チーム登録制の総当たり戦を管理するCog"""
     def __init__(self, bot):
         self.bot = bot
-        self.db = DatabaseManager('tournaments.db')
+        self.db = DatabaseManager('data/tournaments.db')
         
         load_dotenv()
         try: self.rr_channel_id = int(os.getenv('RR_CHANNEL_ID', 0))
@@ -4285,7 +3333,7 @@ async def setup(bot):
 
 
 ==================================================
-File: cogs\roundrobin\rr_handlers.py
+File: cogs\events\roundrobin\rr_handlers.py
 ==================================================
 # cogs/roundrobin/rr_handlers.py
 import discord
@@ -4422,7 +3470,7 @@ async def handle_score_report(cog: "RoundRobinCog", interaction: discord.Interac
 
 
 ==================================================
-File: cogs\roundrobin\rr_logic.py
+File: cogs\events\roundrobin\rr_logic.py
 ==================================================
 # cogs/roundrobin/rr_logic.py
 import discord
@@ -4463,8 +3511,8 @@ def generate_schedule_image(teams_data, matches_data, current_round: int):
     image_width = left_header_width + cell_size * num_teams + margin * 2
     image_height = top_header_height + cell_size * num_teams + margin * 2
     try:
-        font_header_base = ImageFont.truetype("meiryo.ttc", font_size_header, index=0)
-        font_cell = ImageFont.truetype("meiryo.ttc", font_size_cell, index=0)
+        font_header_base = ImageFont.truetype("assets/meiryo.ttc", font_size_header, index=0)
+        font_cell = ImageFont.truetype("assets/meiryo.ttc", font_size_cell, index=0)
     except IOError:
         log.error("フォントファイル 'meiryo.ttc' が見つかりません。")
         font_header_base = ImageFont.load_default(); font_cell = ImageFont.load_default()
@@ -4480,7 +3528,7 @@ def generate_schedule_image(teams_data, matches_data, current_round: int):
         current_font_size = font_size_header; temp_font = font_header_base
         while draw.textbbox((0,0), team_name_str, font=temp_font)[2] > left_header_width - 20 and current_font_size > 10:
             current_font_size -= 1
-            try: temp_font = ImageFont.truetype("meiryo.ttc", current_font_size, index=0)
+            try: temp_font = ImageFont.truetype("assets/meiryo.ttc", current_font_size, index=0)
             except IOError: temp_font = ImageFont.load_default()
         text_bbox = draw.textbbox((0,0), team_name_str, font=temp_font); text_height = text_bbox[3] - text_bbox[1]
         draw.text((margin + 10, margin + top_header_height + i * cell_size + (cell_size - text_height) / 2), team_name_str, font=temp_font, fill=(0, 0, 0))
@@ -4694,13 +3742,13 @@ async def get_joinable_teams(cog: "RoundRobinCog", guild_id: int) -> List[dict]:
 
 
 ==================================================
-File: cogs\roundrobin\rr_models.py
+File: cogs\events\roundrobin\rr_models.py
 ==================================================
 # cogs/roundrobin/rr_models.py
 from dataclasses import dataclass, field
 from typing import List, Union
 import discord
-from cogs.event_manager.models import DummyPlayer
+from cogs.events.event_manager.models import DummyPlayer
 
 @dataclass
 class RR_Team:
@@ -4716,7 +3764,7 @@ class RR_Team:
 
 
 ==================================================
-File: cogs\roundrobin\rr_roles.py
+File: cogs\events\roundrobin\rr_roles.py
 ==================================================
 # cogs/roundrobin/rr_roles.py
 import discord
@@ -4794,7 +3842,7 @@ async def remove_roles_on_leave(cog: "RoundRobinCog", member: discord.Member, te
 
 
 ==================================================
-File: cogs\roundrobin\rr_views.py
+File: cogs\events\roundrobin\rr_views.py
 ==================================================
 # cogs/roundrobin/rr_views.py
 import discord
@@ -4950,7 +3998,454 @@ class RegistrationView(discord.ui.View):
 
 
 ==================================================
-File: cogs\shadowverse\cog.py
+File: cogs\shadowverse\card_manager.py
+==================================================
+import discord
+from discord.ext import commands
+from discord import app_commands
+import sqlite3
+
+# データベースファイルへのパス
+DB_NAME = 'data/sv_cards.db'
+
+# --- カード管理Cogクラス ---
+class ShadowverseCardManager(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    # --- データ追加コマンド (一時的にコメントアウト) ---
+    # @app_commands.command(name="addcard", description="【管理者用】新しいカードをデータベースに追加します。")
+    # @app_commands.checks.has_permissions(administrator=True)
+    # @app_commands.describe(
+    #     name="カード名",
+    #     class_name="クラス名 (例: ドラゴン)",
+    #     rarity="レアリティ (例: レジェンド)",
+    #     card_type="カード種別 (例: フォロワー)",
+    #     cost="コスト (数字)",
+    #     attack="攻撃力 (フォロワー以外は0)",
+    #     health="体力 (フォロワー以外は0)",
+    #     text="カードテキスト (\\nで改行)",
+    #     image_url="カード画像のURL"
+    # )
+    # async def addcard(self, interaction: discord.Interaction, name: str, class_name: str, rarity: str, card_type: str, cost: int, attack: int, health: int, text: str, image_url: str):
+    #     conn = None
+    #     try:
+    #         conn = sqlite3.connect(DB_NAME)
+    #         cursor = conn.cursor()
+    #         # テキストの \n を実際の改行に置換
+    #         formatted_text = text.replace('\\n', '\n')
+            
+    #         cursor.execute('''
+    #             INSERT INTO cards (name, class, rarity, type, cost, attack, health, text, image_url)
+    #             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    #         ''', (name, class_name, rarity, card_type, cost, attack, health, formatted_text, image_url))
+    #         conn.commit()
+    #         await interaction.response.send_message(f"✅ カード「{name}」をデータベースに追加しました。", ephemeral=True)
+    #     except sqlite3.IntegrityError:
+    #         await interaction.response.send_message(f"❌ エラー: カード「{name}」は既に存在します。", ephemeral=True)
+    #     except sqlite3.Error as e:
+    #         await interaction.response.send_message(f"❌ データベースエラーが発生しました: {e}", ephemeral=True)
+    #     finally:
+    #         if conn:
+    #             conn.close()
+
+    # --- ランダム表示コマンド ---
+    @app_commands.command(name="card", description="データベースからランダムにShadowverseのカードを1枚表示します。")
+    async def card(self, interaction: discord.Interaction):
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_NAME)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT * FROM cards ORDER BY RANDOM() LIMIT 1")
+            card = cursor.fetchone()
+
+            if card is None:
+                await interaction.response.send_message("表示できるカードがデータベースにありません。\n管理者に`/addcard`コマンドでの追加を依頼してください。", ephemeral=True)
+                return
+
+            rarity_colors = {"レジェンド": 0xFFD700, "ゴールド": 0xC0C0C0, "シルバー": 0x6E8A99, "ブロンズ": 0xCD7F32}
+            embed = discord.Embed(title=f"**{card['name']}**", color=rarity_colors.get(card["rarity"], 0x777777))
+            
+            if card["image_url"]:
+                embed.set_image(url=card["image_url"])
+            embed.set_footer(text="Shadowverse Card Database")
+
+            await interaction.response.send_message(embed=embed)
+        except sqlite3.Error as e:
+            await interaction.response.send_message(f"❌ データベース処理中にエラーが発生しました: {e}", ephemeral=True)
+        finally:
+            if conn:
+                conn.close()
+    
+    # --- エラーハンドリング (一時的にコメントアウト) ---
+    # @addcard.error
+    # async def on_addcard_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+    #     if isinstance(error, app_commands.MissingPermissions):
+    #         await interaction.response.send_message("❌ このコマンドを実行する権限がありません。", ephemeral=True)
+    #     else:
+    #         await interaction.response.send_message(f"❌ コマンドの実行中に予期せぬエラーが発生しました: {error}", ephemeral=True)
+
+
+# CogをBotに登録するための必須の関数
+async def setup(bot: commands.Bot):
+    await bot.add_cog(ShadowverseCardManager(bot))
+
+
+==================================================
+File: cogs\shadowverse\deck.py
+==================================================
+import discord
+from discord.ext import commands
+from discord import ui
+import cv2
+import numpy as np
+import aiohttp
+import io
+from urllib.parse import urlparse, parse_qs, urlunparse, urlencode
+import asyncio
+import sqlite3 # データベース操作のためにインポート
+
+# --- グローバル変数・定数 ---
+DB_FILE = "data/deck_data.db" # 保存するデータベースファイル名
+
+# --- データベース初期化関数 ---
+def init_database():
+    """データベースファイルとテーブルを初期化する"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    # decksテーブルを作成: user_idとdeck_urlを保存
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS decks (
+            user_id INTEGER NOT NULL,
+            deck_url TEXT NOT NULL,
+            PRIMARY KEY (user_id, deck_url)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+# ユーザー操作用のView
+class DeckUserView(ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @ui.button(label="デッキ登録", style=discord.ButtonStyle.success, custom_id="deck_register_button")
+    async def register(self, interaction: discord.Interaction, button: ui.Button):
+        if not self.cog.registration_open:
+            await interaction.response.send_message("現在、デッキの登録は締め切られています。", ephemeral=True)
+            return
+        
+        # DBから登録数を取得して上限チェック
+        deck_count = await self.cog.db_get_user_deck_count(interaction.user.id)
+        if deck_count >= 2:
+            await interaction.response.send_message("デッキの登録は1人2つまでです。既存のデッキを削除してから再試行してください。", ephemeral=True)
+            return
+
+        await interaction.response.send_message("デッキのQRコードが写っている画像を、60秒以内に1つこのチャンネルに送信してください。", ephemeral=True)
+
+        def check(m):
+            return m.author == interaction.user and m.channel == interaction.channel and m.attachments
+
+        try:
+            msg = await self.cog.bot.wait_for('message', check=check, timeout=60.0)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("タイムアウトしました。もう一度「デッキ登録」ボタンからやり直してください。", ephemeral=True)
+            return
+        
+        processing_msg = await interaction.followup.send("画像を処理中です...", ephemeral=True, wait=True)
+        await self.cog._process_deck_image(interaction, msg.attachments[0], processing_msg)
+        
+        try:
+            await msg.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
+    @ui.button(label="登録確認", style=discord.ButtonStyle.primary, custom_id="deck_check_button")
+    async def check(self, interaction: discord.Interaction, button: ui.Button):
+        await self.cog.check_user_decks(interaction)
+
+    @ui.button(label="登録取消", style=discord.ButtonStyle.danger, custom_id="deck_cancel_button")
+    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
+        deleted_count = await self.cog.db_delete_user_decks(interaction.user.id)
+        if deleted_count > 0:
+            await interaction.response.send_message(f"登録済みのデッキ{deleted_count}件を全て取り消しました。", ephemeral=True)
+        else:
+            await interaction.response.send_message("登録済みのデッキはありません。", ephemeral=True)
+
+# 管理者操作用のView
+class DeckAdminView(ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=None)
+        self.cog = cog
+    
+    @ui.button(label="登録締切", style=discord.ButtonStyle.secondary, custom_id="deck_close_button")
+    async def close_registration(self, interaction: discord.Interaction, button: ui.Button):
+        self.cog.registration_open = False
+        await interaction.response.send_message("デッキの登録を締め切りました。", ephemeral=True)
+
+    @ui.button(label="受付再開", style=discord.ButtonStyle.secondary, custom_id="deck_reopen_button")
+    async def reopen_registration(self, interaction: discord.Interaction, button: ui.Button):
+        self.cog.registration_open = True
+        await interaction.response.send_message("デッキの登録を再開しました。", ephemeral=True)
+
+    @ui.button(label="登録発表", style=discord.ButtonStyle.primary, custom_id="deck_announce_button")
+    async def announce_decks(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer()
+        await self.cog.announce_all_decks(interaction.channel)
+        await interaction.followup.send("発表が完了しました。", ephemeral=True)
+
+    @ui.button(label="全登録削除", style=discord.ButtonStyle.danger, custom_id="deck_delete_all_button")
+    async def delete_all_registrations(self, interaction: discord.Interaction, button: ui.Button):
+        class ConfirmationView(ui.View):
+            def __init__(self, cog_ref):
+                super().__init__(timeout=30.0)
+                self.cog = cog_ref
+                self.message = None
+
+            async def on_timeout(self):
+                if self.message:
+                    try:
+                        await self.message.edit(content="タイムアウトしました。操作はキャンセルされました。", view=None)
+                    except discord.NotFound:
+                        pass
+
+            @ui.button(label="はい、全て削除します", style=discord.ButtonStyle.danger)
+            async def confirm_button(self, interaction: discord.Interaction, button: ui.Button):
+                await self.cog.db_delete_all_decks()
+                await interaction.response.edit_message(content="全てのデッキ登録を削除しました。", view=None)
+                self.stop()
+
+            @ui.button(label="いいえ", style=discord.ButtonStyle.secondary)
+            async def cancel_button(self, interaction: discord.Interaction, button: ui.Button):
+                await interaction.response.edit_message(content="操作はキャンセルされました。", view=None)
+                self.stop()
+
+        view = ConfirmationView(self.cog)
+        await interaction.response.send_message(
+            "**警告:** 本当に全てのデッキ登録を削除しますか？\nこの操作は元に戻せません。",
+            view=view,
+            ephemeral=True
+        )
+        view.message = await interaction.original_response()
+
+# Cogクラスの定義
+class DeckCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.registration_open = True
+        init_database() # Bot起動時にDBを初期化
+        bot.loop.create_task(self.register_views())
+
+    async def register_views(self):
+        await self.bot.wait_until_ready()
+        self.bot.add_view(DeckUserView(self))
+        self.bot.add_view(DeckAdminView(self))
+
+    # --- データベース操作メソッド ---
+    def _db_add_deck(self, user_id: int, deck_url: str):
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("INSERT OR IGNORE INTO decks (user_id, deck_url) VALUES (?, ?)", (user_id, deck_url))
+
+    async def db_add_deck(self, user_id: int, deck_url: str):
+        await asyncio.to_thread(self._db_add_deck, user_id, deck_url)
+
+    def _db_get_user_decks(self, user_id: int) -> list[str]:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.execute("SELECT deck_url FROM decks WHERE user_id = ?", (user_id,))
+            return [row[0] for row in cursor.fetchall()]
+
+    async def db_get_user_decks(self, user_id: int) -> list[str]:
+        return await asyncio.to_thread(self._db_get_user_decks, user_id)
+
+    def _db_get_user_deck_count(self, user_id: int) -> int:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM decks WHERE user_id = ?", (user_id,))
+            return cursor.fetchone()[0]
+
+    async def db_get_user_deck_count(self, user_id: int) -> int:
+        return await asyncio.to_thread(self._db_get_user_deck_count, user_id)
+
+    def _db_delete_user_decks(self, user_id: int) -> int:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM decks WHERE user_id = ?", (user_id,))
+            return cursor.rowcount
+
+    async def db_delete_user_decks(self, user_id: int) -> int:
+        return await asyncio.to_thread(self._db_delete_user_decks, user_id)
+
+    def _db_get_all_decks(self) -> dict[int, list[str]]:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.execute("SELECT user_id, deck_url FROM decks ORDER BY user_id")
+            all_decks = {}
+            for user_id, deck_url in cursor.fetchall():
+                all_decks.setdefault(user_id, []).append(deck_url)
+            return all_decks
+
+    async def db_get_all_decks(self) -> dict[int, list[str]]:
+        return await asyncio.to_thread(self._db_get_all_decks)
+
+    def _db_delete_all_decks(self):
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.execute("DELETE FROM decks")
+
+    async def db_delete_all_decks(self):
+        await asyncio.to_thread(self._db_delete_all_decks)
+
+
+    # --- ヘルパー関数 ---
+    def _transform_deck_url(self, qr_url: str) -> str | None:
+        try:
+            if "shadowverse-wb.com" not in qr_url or "/ja/deck/detail/" not in qr_url:
+                return None
+            parsed_url = urlparse(qr_url)
+            query_params = parse_qs(parsed_url.query)
+            if 'hash' not in query_params: return None
+            hash_value = query_params['hash'][0]
+            new_query_params = {'hash': hash_value, 'lang': 'ja'}
+            return urlunparse(('https', 'shadowverse-wb.com', '/web/Image/deck', '', urlencode(new_query_params), ''))
+        except Exception as e:
+            print(f"URL transformation error: {e}")
+            return None
+
+    async def _process_deck_image(self, interaction: discord.Interaction, attachment: discord.Attachment, processing_msg: discord.WebhookMessage):
+        if not attachment.content_type or not attachment.content_type.startswith('image/'):
+            await processing_msg.edit(content="画像ファイルを添付してください。")
+            return
+        
+        try:
+            image_bytes = await attachment.read()
+            np_array = np.frombuffer(image_bytes, np.uint8)
+            img_color = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+
+            if img_color is None:
+                await processing_msg.edit(content="画像の読み込みに失敗しました。")
+                return
+
+            detector = cv2.QRCodeDetector()
+            qr_data = None
+            
+            gray_img = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+            
+            # 試行1: グレースケール
+            qr_data, _, _ = detector.detectAndDecode(gray_img)
+            # 試行2: 右上
+            if not qr_data:
+                h, w = gray_img.shape
+                qr_data, _, _ = detector.detectAndDecode(gray_img[0:h//2, w//2:w])
+            # 試行3: 二値化
+            if not qr_data:
+                _, binary_img = cv2.threshold(gray_img, 128, 255, cv2.THRESH_BINARY)
+                qr_data, _, _ = detector.detectAndDecode(binary_img)
+            # 試行4: 拡大
+            if not qr_data:
+                h, w = gray_img.shape
+                upscaled = cv2.resize(gray_img, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
+                qr_data, _, _ = detector.detectAndDecode(upscaled)
+
+            if not qr_data:
+                await processing_msg.edit(content="QRコードを検出できませんでした。")
+                return
+            
+            deck_image_url = self._transform_deck_url(qr_data)
+            if not deck_image_url:
+                await processing_msg.edit(content="読み取られたURLが正しくありません。")
+                return
+            
+            await self.db_add_deck(interaction.user.id, deck_image_url)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(deck_image_url) as resp:
+                    if resp.status == 200:
+                        file = discord.File(io.BytesIO(await resp.read()), filename="deck.png")
+                        await processing_msg.edit(content="デッキを登録しました！", attachments=[file])
+                    else:
+                        await processing_msg.edit(content="デッキを登録しました！\n(確認画像の表示に失敗)")
+
+        except Exception as e:
+            print(f"Deck registration error: {e}")
+            await processing_msg.edit(content="デッキの登録中にエラーが発生しました。")
+
+    async def check_user_decks(self, interaction: discord.Interaction):
+        user_decks = await self.db_get_user_decks(interaction.user.id)
+        if not user_decks:
+            await interaction.response.send_message("登録済みのデッキはありません。", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        files_to_send = []
+        async with aiohttp.ClientSession() as session:
+            for i, url in enumerate(user_decks):
+                try:
+                    async with session.get(url) as resp:
+                        if resp.status == 200:
+                            files_to_send.append(discord.File(io.BytesIO(await resp.read()), filename=f"deck_{i+1}.png"))
+                except Exception as e:
+                    print(f"Error fetching deck image for check: {e}")
+        
+        if files_to_send:
+            await interaction.followup.send("あなたが登録したデッキはこちらです。", files=files_to_send, ephemeral=True)
+        else:
+            await interaction.followup.send("デッキ画像の取得に失敗しました。")
+
+    async def announce_all_decks(self, channel: discord.TextChannel):
+        all_decks = await self.db_get_all_decks()
+        if not all_decks:
+            await channel.send("登録されたデッキは1つもありません。")
+            return
+
+        await channel.send("--- 全員の登録デッキを発表します！ ---")
+        
+        for user_id, deck_urls in all_decks.items():
+            try:
+                user = await self.bot.fetch_user(user_id)
+                await channel.send(f"▼ {user.mention} さんのデッキ")
+                
+                files_to_send = []
+                async with aiohttp.ClientSession() as session:
+                    for i, url in enumerate(deck_urls):
+                        try:
+                            async with session.get(url) as resp:
+                                if resp.status == 200:
+                                    files_to_send.append(discord.File(io.BytesIO(await resp.read()), filename=f"{user.name}_deck_{i+1}.png"))
+                        except Exception as e:
+                             print(f"Error fetching deck image for announce: {e}")
+                
+                if files_to_send:
+                    await channel.send(files=files_to_send)
+                else:
+                    await channel.send("（デッキ画像の取得に失敗しました）")
+            except discord.NotFound:
+                await channel.send(f"ID: `{user_id}` のユーザーが見つかりませんでした。")
+            except Exception as e:
+                print(f"Announce error for user {user_id}: {e}")
+                await channel.send(f"ユーザーID: `{user_id}` のデッキ発表中にエラーが発生しました。")
+    
+    # --- コマンド ---
+    @commands.hybrid_command(name="deck_panel_user", description="ユーザー用のデッキ操作パネルを設置します。")
+    @commands.has_permissions(administrator=True)
+    async def deck_panel_user(self, ctx: commands.Context):
+        embed = discord.Embed(title="シャドウバース デッキ登録", description="下のボタンからデッキの登録・確認・取消を行ってください。", color=discord.Color.blue())
+        embed.add_field(name="登録ルール", value="・1人2デッキまで登録可能です。\n・登録を取り消すと、登録したデッキが全て削除されます。\n・デッキは1つずつ登録してください。")
+        await ctx.send(embed=embed, view=DeckUserView(self))
+    
+    @commands.hybrid_command(name="deck_panel_admin", description="管理者用の操作パネルを設置します。")
+    @commands.has_permissions(administrator=True)
+    async def deck_panel_admin(self, ctx: commands.Context):
+        embed = discord.Embed(title="管理者用パネル", description="下のボタンでデッキ登録の管理を行ってください。", color=discord.Color.dark_red())
+        await ctx.send(embed=embed, view=DeckAdminView(self))
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(DeckCog(bot))
+
+
+
+==================================================
+File: cogs\shadowverse\main.py
 ==================================================
 import discord
 from discord.ext import commands
@@ -5100,12 +4595,237 @@ async def setup(bot: commands.Bot):
 
 
 ==================================================
+File: cogs\shadowverse\panel.py
+==================================================
+import discord
+from discord.ext import commands
+from discord import ui
+import pandas as pd
+import os
+import asyncio
+import sqlite3 # SQLiteを扱うためにインポート
+
+# --- 定数 ---
+DB_FILE = "data/user_data.db"  # データベースファイルの名前
+TARGET_CATEGORY_ID = 1003574017900417094 # 通知先として選択できるチャンネルが含まれるカテゴリID
+
+# --- データベース管理クラス ---
+class DatabaseManager:
+    """SQLiteデータベースを管理し、ユーザー設定を永続化するクラス"""
+    def __init__(self, db_path=DB_FILE):
+        self.db_path = db_path
+        self._setup_database()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """DB接続を取得"""
+        return sqlite3.connect(self.db_path)
+
+    def _setup_database(self):
+        """テーブルが存在しない場合に自動で作成する"""
+        with self._get_connection() as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS sv_channel_settings (
+                    user_id INTEGER PRIMARY KEY,
+                    channel_id INTEGER NOT NULL
+                )
+            ''')
+            conn.commit()
+
+    # --- 同期メソッド (裏側で実行) ---
+    def _set_channel_sync(self, user_id: int, channel_id: int):
+        with self._get_connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO sv_channel_settings (user_id, channel_id) VALUES (?, ?)", (user_id, channel_id))
+
+    def _get_channel_sync(self, user_id: int) -> int | None:
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT channel_id FROM sv_channel_settings WHERE user_id = ?", (user_id,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+
+    def _clear_channel_sync(self, user_id: int):
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM sv_channel_settings WHERE user_id = ?", (user_id,))
+
+    # --- 非同期メソッド (Cogから呼び出す用) ---
+    async def set_user_channel(self, user_id: int, channel_id: int):
+        await asyncio.to_thread(self._set_channel_sync, user_id, channel_id)
+
+    async def get_user_channel(self, user_id: int) -> int | None:
+        return await asyncio.to_thread(self._get_channel_sync, user_id)
+
+    async def clear_user_channel(self, user_id: int):
+        await asyncio.to_thread(self._clear_channel_sync, user_id)
+
+
+# --- UIコンポーネント (View, Modalなど) ---
+# 修正: 同フォルダ内のモジュールからインポートするように変更
+try:
+    from .sv_ui import ManualRecordView
+    # ConfirmDeleteViewはsv_uiにない場合があるため、必要ならここで簡易定義するかsv_uiに追加推奨ですが、一旦pass
+    class ConfirmDeleteView(ui.View): pass 
+    from .sv_utils import get_stats_summary, get_recent_matches
+except ImportError:
+    class ManualRecordView(ui.View): pass
+    class ConfirmDeleteView(ui.View): pass
+    def get_stats_summary(user_id, period): return discord.Embed(title="Error")
+    def get_recent_matches(user_id, count): return discord.Embed(title="Error")
+
+
+class ChannelSelectView(ui.View):
+    def __init__(self, channels: list[discord.TextChannel], author_id: int, db_manager: DatabaseManager):
+        super().__init__(timeout=120.0)
+        self.author_id = author_id
+        self.db_manager = db_manager
+        options = [
+            discord.SelectOption(label=ch.name, value=str(ch.id)) for ch in channels[:25]
+        ]
+        self.select_menu = ui.Select(placeholder="通知先にしたいチャンネルを選択してください...", options=options)
+        self.select_menu.callback = self.on_select_submit
+        self.add_item(self.select_menu)
+
+    async def on_select_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        selected_channel_id = int(interaction.data["values"][0])
+        await self.db_manager.set_user_channel(interaction.user.id, selected_channel_id)
+        selected_channel = interaction.guild.get_channel(selected_channel_id)
+        for item in self.children: item.disabled = True
+        await interaction.edit_original_response(
+            content=f"✅ 通知チャンネルを **{selected_channel.mention}** に設定しました。", view=self
+        )
+        self.stop()
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("この操作はコマンドを実行した本人しか行えません。", ephemeral=True)
+            return False
+        return True
+
+# (以降のView, ModalもDBマネージャーを使うように修正済み)
+class StatsPeriodSelectView(ui.View):
+    def __init__(self, author_id: int, bot_instance: commands.Bot, db_manager: DatabaseManager):
+        super().__init__(timeout=60)
+        self.author_id = author_id; self.bot = bot_instance; self.db_manager = db_manager
+    @ui.select(placeholder="集計期間を選択してください...",options=[discord.SelectOption(label="本日", value="today"), discord.SelectOption(label="昨日", value="yesterday"), discord.SelectOption(label="一週間", value="week"), discord.SelectOption(label="全期間", value="all")])
+    async def select_period(self, interaction: discord.Interaction, select: ui.Select):
+        selected_period = select.values[0]
+        await interaction.response.edit_message(content="統計を生成しています...", view=None)
+        embed = await asyncio.to_thread(get_stats_summary, interaction.user.id, selected_period)
+        target_channel_id = await self.db_manager.get_user_channel(interaction.user.id)
+        target_channel = self.bot.get_channel(target_channel_id) if target_channel_id else None
+        if target_channel:
+            try:
+                await target_channel.send(embed=embed)
+                await interaction.followup.send(f"✅ 結果を {target_channel.mention} に送信しました。", ephemeral=True)
+            except discord.Forbidden: await interaction.followup.send(f"❌ 設定されたチャンネル {target_channel.mention} にメッセージを送信する権限がありません。", ephemeral=True)
+        else: await interaction.followup.send(embed=embed)
+
+class HistoryCountModal(ui.Modal, title="履歴の表示件数"):
+    def __init__(self, bot_instance: commands.Bot, db_manager: DatabaseManager):
+        super().__init__(); self.bot = bot_instance; self.db_manager = db_manager
+    count_input = ui.TextInput(label="表示する件数を入力してください", placeholder="1～25の半角数字で入力...", min_length=1, max_length=2)
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.count_input.value.isdigit() or not (1 <= int(self.count_input.value) <= 25): return await interaction.response.send_message("❌ 1から25までの半角数字を入力してください。", ephemeral=True)
+        count = int(self.count_input.value)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        embed = await asyncio.to_thread(get_recent_matches, interaction.user.id, count)
+        target_channel_id = await self.db_manager.get_user_channel(interaction.user.id)
+        target_channel = self.bot.get_channel(target_channel_id) if target_channel_id else None
+        if target_channel:
+            try:
+                await target_channel.send(embed=embed)
+                await interaction.followup.send(f"✅ 結果を {target_channel.mention} に送信しました。", ephemeral=True)
+            except discord.Forbidden: await interaction.followup.send(f"❌ 設定されたチャンネル {target_channel.mention} にメッセージを送信する権限がありません。", ephemeral=True)
+        else: await interaction.followup.send(embed=embed)
+
+class ShadowversePersistentPanel(ui.View):
+    def __init__(self, bot_instance: commands.Bot, db_manager: DatabaseManager):
+        super().__init__(timeout=None); self.bot = bot_instance; self.db_manager = db_manager
+    @ui.button(label="手動登録", style=discord.ButtonStyle.success, custom_id="sv_panel:record")
+    async def record(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_message(embed=ManualRecordView(author_id=interaction.user.id).create_embed(), view=ManualRecordView(author_id=interaction.user.id), ephemeral=True)
+    @ui.button(label="戦績表示", style=discord.ButtonStyle.primary, custom_id="sv_panel:stats")
+    async def stats(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_message("どの期間の戦績サマリーを表示しますか？", view=StatsPeriodSelectView(author_id=interaction.user.id, bot_instance=self.bot, db_manager=self.db_manager), ephemeral=True)
+    @ui.button(label="直近履歴", style=discord.ButtonStyle.secondary, custom_id="sv_panel:history")
+    async def history(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(HistoryCountModal(bot_instance=self.bot, db_manager=self.db_manager))
+    @ui.button(label="⚙️ 通知チャンネル設定", style=discord.ButtonStyle.secondary, custom_id="sv_panel:set_channel", row=1)
+    async def set_channel(self, interaction: discord.Interaction, button: ui.Button):
+        category = self.bot.get_channel(TARGET_CATEGORY_ID)
+        if not category or not isinstance(category, discord.CategoryChannel): return await interaction.response.send_message(f"❌ 対象カテゴリが見つかりません。", ephemeral=True)
+        text_channels = category.text_channels
+        if not text_channels: return await interaction.response.send_message(f"❌ カテゴリ内に選択可能なチャンネルがありません。", ephemeral=True)
+        await interaction.response.send_message("通知先に設定したいチャンネルを以下から選択してください:", view=ChannelSelectView(channels=text_channels, author_id=interaction.user.id, db_manager=self.db_manager), ephemeral=True)
+    @ui.button(label="全データ削除", style=discord.ButtonStyle.danger, custom_id="sv_panel:delete", row=1)
+    async def delete(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_message("本当にあなたの全ての戦績データを削除しますか？", view=ConfirmDeleteView(author_id=interaction.user.id), ephemeral=True)
+
+
+# --- メインのCogクラス ---
+class ShadowversePanelCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        # Cog初期化時にDBマネージャーをインスタンス化
+        self.db_manager = DatabaseManager()
+        # Bot起動時に永続Viewを登録
+        self.bot.add_view(ShadowversePersistentPanel(bot, self.db_manager))
+
+    @commands.command(name="svパネル設置")
+    @commands.has_permissions(manage_channels=True)
+    async def create_sv_panel(self, ctx: commands.Context):
+        """シャドウバース戦績管理用のボタンパネルを設置します。"""
+        embed = discord.Embed(
+            title="⚔️ シャドウバース 戦績管理パネル ⚔️",
+            description=(
+                "**⚠️ まずはじめに、`⚙️ 通知チャンネル設定` ボタンから結果を投稿する個人チャンネルを設定してください。**\n\n"
+                "設定が完了したら、下の各ボタンから戦績の記録や確認ができます。\n\n"
+                "📸 **リプレイ画像からの登録**は、引き続き `/replay` をご利用ください。"
+            ),
+            color=discord.Color.purple()
+        )
+        await ctx.send(embed=embed, view=ShadowversePersistentPanel(self.bot, self.db_manager))
+
+    # --- `!svchannel` コマンド群をこのCogに統合 ---
+    @commands.group(name="svchannel", invoke_without_command=True)
+    async def svchannel(self, ctx: commands.Context):
+        """個人通知チャンネルの管理コマンド"""
+        await ctx.send(
+            "**個人通知チャンネル管理コマンド**\n"
+            "・通知チャンネルの設定は、戦績管理パネルの `⚙️ 通知チャンネル設定` ボタンから行えます。\n\n"
+            "`!svchannel view`: 現在設定されている通知先チャンネルを確認します。\n"
+            "`!svchannel clear`: 通知先の設定を解除します。"
+        )
+
+    @svchannel.command(name="view")
+    async def view_channel(self, ctx: commands.Context):
+        """現在設定されている通知先チャンネルを確認します。"""
+        channel_id = await self.db_manager.get_user_channel(ctx.author.id)
+        if channel_id:
+            target_channel = self.bot.get_channel(channel_id)
+            if target_channel:
+                await ctx.send(f"ℹ️ あなたの通知チャンネルは **{target_channel.mention}** に設定されています。")
+            else:
+                await ctx.send(f"⚠️ あなたの通知チャンネル (ID: `{channel_id}`) が見つかりませんでした。")
+        else:
+            await ctx.send("ℹ️ あなたの通知チャンネルはまだ設定されていません。")
+
+    @svchannel.command(name="clear")
+    async def clear_channel(self, ctx: commands.Context):
+        """通知先チャンネルの設定を解除します。"""
+        await self.db_manager.clear_user_channel(ctx.author.id)
+        await ctx.send("✅ 通知チャンネルの設定を解除しました。")
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(ShadowversePanelCog(bot))
+
+==================================================
 File: cogs\shadowverse\sv_constants.py
 ==================================================
 # sv_constants.py
 import discord
 
-DB_FILE = "shadowverse_data.db"
+DB_FILE = "data/shadowverse_data.db"
 CLASS_NAMES = ["エルフ", "ロイヤル", "ウィッチ", "ドラゴン", "ナイトメア", "ビショップ", "ネメシス"]
 TURN_ORDERS = ["先攻", "後攻", "不明"]
 RESULTS = ["WIN", "LOSE"]
@@ -5232,7 +4952,7 @@ from .sv_db import save_records_to_db, set_user_channel_setting, delete_match_re
 from .sv_utils import get_stats_summary, get_recent_matches
 
 if typing.TYPE_CHECKING:
-    from .cog import ShadowverseCog
+    from .main import ShadowverseCog
 
 class ManualRecordView(ui.View):
     def __init__(self, author_id: int):
@@ -5730,97 +5450,385 @@ def get_help_embed():
 
 
 ==================================================
-File: cogs\shadowverse_card_manager\cog.py
+File: cogs\utils\gemini.py
+==================================================
+import os
+import asyncio
+import discord
+from discord.ext import commands
+import google.generativeai as genai
+import sqlite3
+import json
+import re  # 変更点: 正規表現ライブラリをインポート
+
+# --- 定数の定義 ---
+# Gemini APIキーを設定
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# 変更点: AIへのシステムレベルの指示を定義
+SYSTEM_INSTRUCTION = "重要: あなたの回答は、簡潔にまとめてください。"
+
+# 変更点: モデルの初期化時にシステム指示を設定
+model = genai.GenerativeModel(
+    'gemini-2.5-flash',
+    system_instruction=SYSTEM_INSTRUCTION
+)
+
+# 会話履歴を保持する上限数を設定
+MAX_HISTORY = 10 
+
+# データベースファイルのパスを定数として定義
+DB_PATH = 'data/gemini_history.db'
+
+class GeminiCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self._init_db()
+
+    # --- データベース操作用のメソッド ---
+
+    def _init_db(self):
+        """データベースを初期化し、履歴保存用のテーブルを作成する。"""
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS chat_history (
+                    channel_id INTEGER PRIMARY KEY,
+                    history TEXT NOT NULL
+                )
+            ''')
+            conn.commit()
+        #print("GeminiCog: データベース接続とテーブルの準備が完了しました。")
+
+    def _serialize_history(self, history: list) -> str:
+        """会話履歴オブジェクトをJSON文字列に変換する。"""
+        serializable = [
+            {'role': content.role, 'parts': [part.text for part in content.parts]}
+            for content in history
+        ]
+        return json.dumps(serializable)
+
+    def _deserialize_history(self, json_str: str) -> list:
+        """JSON文字列から会話履歴リストを復元する。"""
+        if not json_str:
+            return []
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            return []
+
+    def _load_history(self, channel_id: int) -> list:
+        """データベースから指定されたチャンネルの会話履歴を読み込む。"""
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT history FROM chat_history WHERE channel_id = ?", (channel_id,))
+            result = cursor.fetchone()
+            if result:
+                return self._deserialize_history(result[0])
+        return []
+
+    def _save_history(self, channel_id: int, history: list):
+        """指定されたチャンネルの会話履歴をデータベースに保存する。"""
+        serialized_history = self._serialize_history(history)
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO chat_history (channel_id, history)
+                VALUES (?, ?)
+            ''', (channel_id, serialized_history))
+            conn.commit()
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author == self.bot.user or message.mention_everyone or not self.bot.user.mentioned_in(message):
+            return
+
+        # 変更点: 正規表現を使ってメンションをより確実に除去
+        user_prompt = re.sub(f'^<@!?{self.bot.user.id}>\\s*', '', message.content).strip()
+        
+        # メンション削除後にメッセージが空になった場合は無視
+        if not user_prompt:
+            return
+
+        channel_id = message.channel.id
+        
+        history_data = self._load_history(channel_id)
+        chat = model.start_chat(history=history_data)
+        
+        if len(chat.history) > MAX_HISTORY:
+            chat.history = chat.history[-MAX_HISTORY:]
+            #print(f"チャンネル {channel_id} の会話履歴を最新{MAX_HISTORY // 2}往復に制限しました。")
+
+        # 変更点: `system_instruction` を利用するため、プロンプトの加工は不要
+        prompt = user_prompt
+        
+        try:
+            #print(f"プロンプト: {prompt}")
+            
+            response_stream = await chat.send_message_async(prompt, stream=True)
+            
+            buffer = ""
+            current_content = ""
+            sent_message = None
+            last_send_time = asyncio.get_event_loop().time()
+
+            async for chunk in response_stream:
+                buffer += chunk.text
+                current_time = asyncio.get_event_loop().time()
+
+                if len(buffer) > 200 or (current_time - last_send_time > 1.0 and buffer):
+                    new_content = current_content + buffer
+                    if not sent_message:
+                        sent_message = await message.reply(new_content)
+                    else:
+                        await sent_message.edit(content=new_content)
+                    
+                    current_content = new_content
+                    buffer = ""
+                    last_send_time = current_time
+
+            if buffer:
+                final_content = current_content + buffer
+                if not sent_message:
+                    await message.reply(final_content)
+                else:
+                    await sent_message.edit(content=final_content)
+
+            #print("ストリーミング返信完了。")
+
+            self._save_history(channel_id, chat.history)
+            #print(f"チャンネル {channel_id} の会話履歴をデータベースに保存しました。")
+
+        except Exception as e:
+            print(f"エラーが発生しました: {e}")
+            await message.reply(f"エラーが発生しました: {e}")
+
+async def setup(bot):
+    await bot.add_cog(GeminiCog(bot))
+
+==================================================
+File: cogs\utils\reaction.py
 ==================================================
 import discord
 from discord.ext import commands
-from discord import app_commands
-import sqlite3
+import asyncio
 
-# データベースファイルへのパス
-DB_NAME = 'sv_cards.db'
+# リアクションのトリガーと、それに対応するリアクションのリストをマッピングで管理します。
+# ここに新しいトリガーとリアクションの組み合わせを追加するだけで、機能拡張ができます。
+REACTION_MAP = {
+    # ⭐ が押されたら、クラス絵文字を順番に追加
+    "⭐": [
+        discord.PartialEmoji(name="Class_Forestcraft", id=922142168473301082),
+        discord.PartialEmoji(name="Class_Swordcraft", id=922142203323744296),
+        discord.PartialEmoji(name="Class_Runecraft", id=922142232595791953),
+        discord.PartialEmoji(name="Class_Dragoncraft", id=922142264942284830),
+        discord.PartialEmoji(name="Class_Abysscraft", id=1410146572930519040),
+        discord.PartialEmoji(name="Class_Havencraft", id=922142398073700433),
+        discord.PartialEmoji(name="Class_Portalcraft", id=922142424380346399),
+    ],
+    # ✅ が押されたら、⭕ と ❌ を追加 (Unicode絵文字もそのまま使えます)
+    "✅": ["⭕", "❌"],
+}
 
-# --- カード管理Cogクラス ---
-class ShadowverseCardManager(commands.Cog):
+
+class ReactionCog(commands.Cog):
+    """
+    特定のリアクションやメッセージをトリガーにして、リアクションを追加するCog
+    """
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # --- データ追加コマンド (一時的にコメントアウト) ---
-    # @app_commands.command(name="addcard", description="【管理者用】新しいカードをデータベースに追加します。")
-    # @app_commands.checks.has_permissions(administrator=True)
-    # @app_commands.describe(
-    #     name="カード名",
-    #     class_name="クラス名 (例: ドラゴン)",
-    #     rarity="レアリティ (例: レジェンド)",
-    #     card_type="カード種別 (例: フォロワー)",
-    #     cost="コスト (数字)",
-    #     attack="攻撃力 (フォロワー以外は0)",
-    #     health="体力 (フォロワー以外は0)",
-    #     text="カードテキスト (\\nで改行)",
-    #     image_url="カード画像のURL"
-    # )
-    # async def addcard(self, interaction: discord.Interaction, name: str, class_name: str, rarity: str, card_type: str, cost: int, attack: int, health: int, text: str, image_url: str):
-    #     conn = None
-    #     try:
-    #         conn = sqlite3.connect(DB_NAME)
-    #         cursor = conn.cursor()
-    #         # テキストの \n を実際の改行に置換
-    #         formatted_text = text.replace('\\n', '\n')
-            
-    #         cursor.execute('''
-    #             INSERT INTO cards (name, class, rarity, type, cost, attack, health, text, image_url)
-    #             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    #         ''', (name, class_name, rarity, card_type, cost, attack, health, formatted_text, image_url))
-    #         conn.commit()
-    #         await interaction.response.send_message(f"✅ カード「{name}」をデータベースに追加しました。", ephemeral=True)
-    #     except sqlite3.IntegrityError:
-    #         await interaction.response.send_message(f"❌ エラー: カード「{name}」は既に存在します。", ephemeral=True)
-    #     except sqlite3.Error as e:
-    #         await interaction.response.send_message(f"❌ データベースエラーが発生しました: {e}", ephemeral=True)
-    #     finally:
-    #         if conn:
-    #             conn.close()
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """
+        メッセージが送信されたときに呼び出されるイベントリスナー
+        @everyone を含むメッセージに特定の絵文字でリアクションします。
+        """
+        # Bot自身のメッセージは無視する
+        if message.author == self.bot.user:
+            return
 
-    # --- ランダム表示コマンド ---
-    @app_commands.command(name="card", description="データベースからランダムにShadowverseのカードを1枚表示します。")
-    async def card(self, interaction: discord.Interaction):
-        conn = None
+        # メッセージに @everyone が含まれている場合
+        if "@everyone" in message.content:
+            try:
+                # 指定されたカスタム絵文字でリアクション
+                await message.add_reaction("<:Mimashita:1425853002392272999>")
+            except discord.Forbidden:
+                # リアクション追加の権限がない場合
+                print(f"リアクションの追加権限がありません: channel_id={message.channel.id}")
+            except discord.HTTPException as e:
+                # 絵文字が見つからない、またはその他のHTTPエラー
+                print(f"リアクション追加中にHTTPエラー: {e}")
+            except Exception as e:
+                print(f"リアクション追加中に予期せぬエラー: {e}")
+
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        """
+        リアクションが追加されたときに呼び出されるイベントリスナー
+        on_reaction_add と違い、Botが起動する前のメッセージにも対応できます
+        """
+        # リアクションを追加したのがBot自身の場合は無視する
+        if payload.user_id == self.bot.user.id:
+            return
+
+        # トリガーとなる絵文字がマップに存在するか確認
+        trigger_emoji = str(payload.emoji)
+        if trigger_emoji not in REACTION_MAP:
+            return
+
+        # 対応するリアクションリストを取得
+        reactions_to_add = REACTION_MAP[trigger_emoji]
+
+        # リアクションが付けられたチャンネルとメッセージを取得
         try:
-            conn = sqlite3.connect(DB_NAME)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+            channel = self.bot.get_channel(payload.channel_id)
+            if not channel or not isinstance(channel, discord.TextChannel):
+                return # DMなど、テキストチャンネル以外は無視
+            message = await channel.fetch_message(payload.message_id)
+        except discord.NotFound:
+            # メッセージが見つからない場合は何もしない
+            print(f"メッセージが見つかりませんでした: {payload.message_id}")
+            return
+        except discord.Forbidden:
+            # チャンネルにアクセス権がない場合は何もしない
+            print(f"チャンネルにアクセスできません: {payload.channel_id}")
+            return
+        except Exception as e:
+            print(f"メッセージ取得中に予期せぬエラー: {e}")
+            return
 
-            cursor.execute("SELECT * FROM cards ORDER BY RANDOM() LIMIT 1")
-            card = cursor.fetchone()
-
-            if card is None:
-                await interaction.response.send_message("表示できるカードがデータベースにありません。\n管理者に`/addcard`コマンドでの追加を依頼してください。", ephemeral=True)
-                return
-
-            rarity_colors = {"レジェンド": 0xFFD700, "ゴールド": 0xC0C0C0, "シルバー": 0x6E8A99, "ブロンズ": 0xCD7F32}
-            embed = discord.Embed(title=f"**{card['name']}**", color=rarity_colors.get(card["rarity"], 0x777777))
-            
-            if card["image_url"]:
-                embed.set_image(url=card["image_url"])
-            embed.set_footer(text="Shadowverse Card Database")
-
-            await interaction.response.send_message(embed=embed)
-        except sqlite3.Error as e:
-            await interaction.response.send_message(f"❌ データベース処理中にエラーが発生しました: {e}", ephemeral=True)
-        finally:
-            if conn:
-                conn.close()
-    
-    # --- エラーハンドリング (一時的にコメントアウト) ---
-    # @addcard.error
-    # async def on_addcard_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-    #     if isinstance(error, app_commands.MissingPermissions):
-    #         await interaction.response.send_message("❌ このコマンドを実行する権限がありません。", ephemeral=True)
-    #     else:
-    #         await interaction.response.send_message(f"❌ コマンドの実行中に予期せぬエラーが発生しました: {error}", ephemeral=True)
+        # 定義された絵文字リストを順番にリアクションとして追加
+        try:
+            for emoji in reactions_to_add:
+                await message.add_reaction(emoji)
+                # リアクションが早すぎると順番が分かりにくいため、少し待機する
+                await asyncio.sleep(0.5)
+        except discord.Forbidden:
+            # リアクション追加の権限がない場合
+            print(f"リアクションの追加権限がありません: channel_id={payload.channel_id}")
+        except Exception as e:
+            print(f"リアクション追加中にエラー: {e}")
 
 
-# CogをBotに登録するための必須の関数
 async def setup(bot: commands.Bot):
-    await bot.add_cog(ShadowverseCardManager(bot))
+    """
+    BotにCogを登録するためのセットアップ関数
+    """
+    await bot.add_cog(ReactionCog(bot))
+    #print("ReactionCogが正常にロードされました。")
 
+
+==================================================
+File: cogs\utils\room_match.py
+==================================================
+import discord
+from discord.ext import commands
+from discord.ui import View, Button, button
+import os
+
+# .envファイルから読み込む環境変数名
+ROOM_MATCH_CHANNEL_ID_ENV = "ROOM_MATCH_CHANNEL_ID"
+
+# --- ボタンが押されたときの処理を定義する永続View ---
+class RoomMatchPersistentView(View):
+    def __init__(self, target_channel_id: int):
+        super().__init__(timeout=None)
+        # 募集メッセージを送信するチャンネルIDを保持
+        self.target_channel_id = target_channel_id
+
+    @button(label="@everyoneでルムマ募集", style=discord.ButtonStyle.primary, custom_id="persistent_view:room_match_separate_channel")
+    async def room_match_button(self, interaction: discord.Interaction, button: Button):
+        # 保持しているIDから、募集メッセージを送信するチャンネルを取得
+        target_channel = interaction.guild.get_channel(self.target_channel_id)
+
+        # チャンネルが見つからない場合のエラー処理
+        if not target_channel:
+            await interaction.response.send_message(
+                "❌ エラー: 募集メッセージを送信するチャンネルが見つかりませんでした。\nBot管理者に連絡してください。",
+                ephemeral=True
+            )
+            return
+
+        # ボタンを押したユーザーとメンション設定
+        # user.display_name を使用してサーバープロフィール名を取得
+        user_display_name = interaction.user.display_name
+        allowed_mentions = discord.AllowedMentions(everyone=True)
+        
+        # ★★★ ここが変更点です ★★★
+        message_content = f"@everyone **{user_display_name}** さんがルームマッチを募集しています！"
+
+        try:
+            # 指定されたチャンネルに募集メッセージを送信
+            await target_channel.send(content=message_content, allowed_mentions=allowed_mentions)
+            # ボタンを押した本人にだけ確認メッセージを送信
+            await interaction.response.send_message(
+                f"✅ {target_channel.mention} にルームマッチの募集を送信しました。",
+                ephemeral=True,
+                delete_after=15 # 15秒後に自動で消える
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f"❌ エラー: {target_channel.mention} にメッセージを送信する権限がありません。",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 不明なエラーが発生しました: {e}", ephemeral=True)
+
+
+# --- Cogクラスの定義 ---
+class RoomMatchCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.target_channel_id = None
+        # .envからチャンネルIDを読み込む
+        try:
+            # 環境変数からIDを取得し、整数に変換
+            self.target_channel_id = int(os.getenv(ROOM_MATCH_CHANNEL_ID_ENV))
+        except (TypeError, ValueError):
+            # .envに設定がない、または値が不正な場合は警告を出力
+            print(f"⚠️  警告: 環境変数 '{ROOM_MATCH_CHANNEL_ID_ENV}' が.envファイルに設定されていないか、値が無効です。")
+
+        # チャンネルIDが正常に読み込めた場合のみ、永続ViewをBotに登録
+        if self.target_channel_id:
+            self.bot.add_view(RoomMatchPersistentView(self.target_channel_id))
+
+    # --- プレフィックスコマンドの定義 ---
+    @commands.command(name="ルムマ募集パネル設置")
+    @commands.has_permissions(manage_channels=True) # 「チャンネルの管理」権限を持つユーザーのみ実行可能
+    async def create_room_match_panel(self, ctx: commands.Context):
+        # Cog初期化時にチャンネルIDが読み込めていなければエラーメッセージを返す
+        if not self.target_channel_id:
+            await ctx.send("❌ エラー: 募集メッセージを送信するチャンネルが設定されていません。`.env`ファイルを確認してください。")
+            return
+
+        # IDからチャンネルオブジェクトを取得
+        target_channel = self.bot.get_channel(self.target_channel_id)
+        if not target_channel:
+            await ctx.send(f"❌ エラー: 指定されたID `{self.target_channel_id}` のチャンネルが見つかりません。IDが正しいか確認してください。")
+            return
+
+        # パネルの埋め込みメッセージを作成
+        embed = discord.Embed(
+            title="ルームマッチ募集パネル",
+            description=f"下のボタンを押すと、{target_channel.mention} に `@everyone` メンション付きでルームマッチの募集ができます。",
+            color=discord.Color.blue()
+        )
+        
+        # ViewにターゲットチャンネルIDを渡してメッセージを送信
+        await ctx.send(embed=embed, view=RoomMatchPersistentView(self.target_channel_id))
+
+    # --- コマンドのエラーハンドリング ---
+    @create_room_match_panel.error
+    async def create_room_match_panel_error(self, ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send("❌ このコマンドを実行するには`チャンネルの管理`権限が必要です。")
+        else:
+            await ctx.send(f"❌ コマンド実行中にエラーが発生しました: {error}")
+            print(f"コマンドエラー: {error}")
+
+
+# --- BotにCogを登録するためのsetup関数 ---
+async def setup(bot: commands.Bot):
+    await bot.add_cog(RoomMatchCog(bot))
