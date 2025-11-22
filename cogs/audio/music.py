@@ -6,7 +6,6 @@ import yt_dlp
 import logging
 import os
 from dotenv import load_dotenv
-import functools
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -40,7 +39,7 @@ class MusicCog(commands.Cog):
             'cookiefile': self.cookie_path if self.cookie_path and os.path.exists(self.cookie_path) else None
         }
         
-        # Noneの項目は削除しておく（yt-dlpが嫌う場合があるため）
+        # Noneの項目は削除しておく
         if self.YDL_OPTIONS['cookiefile'] is None:
             del self.YDL_OPTIONS['cookiefile']
 
@@ -100,10 +99,16 @@ class MusicCog(commands.Cog):
             self.voice_client = await channel.connect()
         await ctx.send(f"**{channel.name}** に接続しました。")
 
-    # --- 重い処理を別スレッドで実行するためのラッパー関数 ---
-    def _extract_info_sync(self, search_query):
+    # --- 情報取得処理（URL対応版） ---
+    def _extract_info_sync(self, query):
         with yt_dlp.YoutubeDL(self.YDL_OPTIONS) as ydl:
-            return ydl.extract_info(f"ytsearch:{search_query}", download=False)
+            # URLかどうかの簡易チェック
+            if query.startswith("http://") or query.startswith("https://"):
+                # URLならそのまま渡す
+                return ydl.extract_info(query, download=False)
+            else:
+                # 文字列ならYouTube検索を行う
+                return ydl.extract_info(f"ytsearch:{query}", download=False)
 
     @commands.command(name='play', aliases=['p', '再生'], help='YouTubeで曲を検索し、キューに追加します。')
     async def play(self, ctx, *, search: str):
@@ -113,17 +118,28 @@ class MusicCog(commands.Cog):
             else:
                 return await ctx.send("音楽を再生するには、ボイスチャンネルに参加している必要があります。")
         
-        await ctx.send(f"`{search}` を検索しています...")
+        # URLか検索ワードかでメッセージを変える
+        if search.startswith("http"):
+            await ctx.send(f"URLを読み込んでいます...")
+        else:
+            await ctx.send(f"`{search}` を検索しています...")
         
         try:
-            # 【修正箇所】ここで asyncio.to_thread を使い、検索処理を別スレッドに逃がす
-            # これによりBot全体のフリーズ（Heartbeat Blocked）を防ぎます
+            # 非同期で情報を取得
             info = await asyncio.to_thread(self._extract_info_sync, search)
             
-            if 'entries' not in info or not info['entries']:
-                return await ctx.send("検索結果が見つかりませんでした。")
+            video = None
             
-            video = info['entries'][0]
+            # 【重要】URL直接指定と検索結果で返り値の構造が違う場合があるため分岐
+            if 'entries' in info:
+                # 検索結果またはプレイリストの場合
+                if not info['entries']:
+                    return await ctx.send("動画が見つかりませんでした。")
+                video = info['entries'][0] # 先頭の動画を取得
+            else:
+                # 直接の動画情報の場合
+                video = info
+            
             video_info = { 'url': video['url'], 'title': video['title'], 'requester': ctx.author }
             self.music_queue.append(video_info)
             
@@ -134,7 +150,6 @@ class MusicCog(commands.Cog):
                 
         except Exception as e:
             logging.error(f"再生コマンドでエラーが発生しました: {e}")
-            # エラー内容に 'Sign in' が含まれていたら、ユーザーに分かりやすく伝える
             if "Sign in" in str(e):
                  await ctx.send("⚠️ この動画は年齢制限などで再生できませんでした。")
             else:
