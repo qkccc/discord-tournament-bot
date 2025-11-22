@@ -1,4 +1,4 @@
-# cogs/music_cog.py
+# cogs/audio/music.py
 import asyncio
 import discord
 from discord.ext import commands
@@ -6,6 +6,7 @@ import yt_dlp
 import logging
 import os
 from dotenv import load_dotenv
+import functools
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -25,14 +26,24 @@ class MusicCog(commands.Cog):
         self.voice_client = None
         # .envファイルからFFmpegのパスを読み込む。見つからない場合は'ffmpeg'をデフォルト値とする。
         self.ffmpeg_path = os.getenv('FFMPEG_PATH', 'ffmpeg')
+        
+        # .envからCookieファイルのパスを読み込む（任意）
+        self.cookie_path = os.getenv('YTDL_COOKIE_PATH')
 
         self.YDL_OPTIONS = {
             'format': 'bestaudio[ext=opus]/bestaudio/best',
             'noplaylist': True,
             'quiet': True,
             'default_search': 'auto',
-            'source_address': '0.0.0.0'
+            'source_address': '0.0.0.0',
+            # Cookieファイルがあれば設定に追加
+            'cookiefile': self.cookie_path if self.cookie_path and os.path.exists(self.cookie_path) else None
         }
+        
+        # Noneの項目は削除しておく（yt-dlpが嫌う場合があるため）
+        if self.YDL_OPTIONS['cookiefile'] is None:
+            del self.YDL_OPTIONS['cookiefile']
+
         self.FFMPEG_OPTIONS = {
             'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
             'options': '-vn'
@@ -89,6 +100,11 @@ class MusicCog(commands.Cog):
             self.voice_client = await channel.connect()
         await ctx.send(f"**{channel.name}** に接続しました。")
 
+    # --- 重い処理を別スレッドで実行するためのラッパー関数 ---
+    def _extract_info_sync(self, search_query):
+        with yt_dlp.YoutubeDL(self.YDL_OPTIONS) as ydl:
+            return ydl.extract_info(f"ytsearch:{search_query}", download=False)
+
     @commands.command(name='play', aliases=['p', '再生'], help='YouTubeで曲を検索し、キューに追加します。')
     async def play(self, ctx, *, search: str):
         if not self.voice_client:
@@ -98,20 +114,31 @@ class MusicCog(commands.Cog):
                 return await ctx.send("音楽を再生するには、ボイスチャンネルに参加している必要があります。")
         
         await ctx.send(f"`{search}` を検索しています...")
+        
         try:
-            with yt_dlp.YoutubeDL(self.YDL_OPTIONS) as ydl:
-                info = ydl.extract_info(f"ytsearch:{search}", download=False)
-                if 'entries' not in info or not info['entries']:
-                    return await ctx.send("検索結果が見つかりませんでした。")
-                video = info['entries'][0]
-                video_info = { 'url': video['url'], 'title': video['title'], 'requester': ctx.author }
-                self.music_queue.append(video_info)
-                await ctx.send(f"**キューに追加しました:** {video_info['title']}")
-                if not self.is_playing:
-                    await self.play_next_song(ctx)
+            # 【修正箇所】ここで asyncio.to_thread を使い、検索処理を別スレッドに逃がす
+            # これによりBot全体のフリーズ（Heartbeat Blocked）を防ぎます
+            info = await asyncio.to_thread(self._extract_info_sync, search)
+            
+            if 'entries' not in info or not info['entries']:
+                return await ctx.send("検索結果が見つかりませんでした。")
+            
+            video = info['entries'][0]
+            video_info = { 'url': video['url'], 'title': video['title'], 'requester': ctx.author }
+            self.music_queue.append(video_info)
+            
+            await ctx.send(f"**キューに追加しました:** {video_info['title']}")
+            
+            if not self.is_playing:
+                await self.play_next_song(ctx)
+                
         except Exception as e:
             logging.error(f"再生コマンドでエラーが発生しました: {e}")
-            await ctx.send("曲の再生中にエラーが発生しました。")
+            # エラー内容に 'Sign in' が含まれていたら、ユーザーに分かりやすく伝える
+            if "Sign in" in str(e):
+                 await ctx.send("⚠️ この動画は年齢制限などで再生できませんでした。")
+            else:
+                 await ctx.send("曲の再生中にエラーが発生しました。")
     
     @commands.command(name='pause', aliases=['一時停止'], help='現在再生中の曲を一時停止します。')
     async def pause(self, ctx):
