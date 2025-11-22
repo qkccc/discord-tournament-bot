@@ -4,7 +4,7 @@ from discord.ext import commands, tasks
 import datetime
 import os
 from dotenv import load_dotenv
-from cogs.utils.db_handler import db # 共通DBハンドラをインポート
+from cogs.utils.db_handler import db
 
 load_dotenv()
 
@@ -21,7 +21,7 @@ class VoiceLoggerCog(commands.Cog):
         self.VC_REPORT_DESTINATION_ID = self._get_env_var_as_int("VC_REPORT_DESTINATION_ID")
 
         if not all([self.TARGET_ROLE_NAME, self.ALERT_CHANNEL_ID, self.ATTENDANCE_CHANNEL_ID]):
-             raise ValueError("必要な設定（ロール名やチャンネルID）が.envファイルに設定されていません。")
+            raise ValueError("必要な設定（ロール名やチャンネルID）が.envファイルに設定されていません。")
 
         self.active_vc_sessions = {}
         self.report_vc_start_time = None
@@ -68,7 +68,6 @@ class VoiceLoggerCog(commands.Cog):
         target_vc = self.bot.get_channel(self.VC_REPORT_TARGET_ID)
         if target_vc and target_vc.members:
             member_ids = tuple(m.id for m in target_vc.members)
-            # プレースホルダの生成 (?, ?, ...)
             placeholders = ','.join('?' for _ in member_ids)
             query = f"SELECT MIN(join_time) FROM voice_sessions WHERE channel_id = ? AND user_id IN ({placeholders}) AND leave_time IS NULL"
             result = await db.fetchone(query, (self.VC_REPORT_TARGET_ID, *member_ids))
@@ -101,22 +100,29 @@ class VoiceLoggerCog(commands.Cog):
         if member.bot: return
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         
+        # 退出処理
         if before.channel and before.channel != after.channel:
             await self._end_user_session(member, before.channel, now_utc)
             if not before.channel.members:
                 start_time_utc = self.active_vc_sessions.pop(before.channel.id, None)
                 if start_time_utc:
                     duration = now_utc - start_time_utc
+                    # 通話終了ログは、レポート対象チャンネルの場合は出さないままにする（レポートと重複してうるさいため）
+                    # もし終了ログも必要なら、ここのif文も外してください
                     if before.channel.id != self.VC_REPORT_TARGET_ID:
                         await self.send_call_end_notification(before.channel, duration, member.guild)
         
+        # 入室処理
         if after.channel and after.channel != before.channel:
             if len(after.channel.members) == 1:
-                if after.channel.id != self.VC_REPORT_TARGET_ID:
-                    await self.send_call_start_notification(member, after.channel, now_utc)
+                # 【修正箇所】以前はここで「レポート対象チャンネルなら通知しない」判定がありましたが削除しました。
+                # これにより、どのチャンネルでも最初の1人が入れば通知が飛びます。
+                await self.send_call_start_notification(member, after.channel, now_utc)
                 self.active_vc_sessions[after.channel.id] = now_utc
+            
             await self._start_user_session(member, after.channel, now_utc)
 
+        # レポート生成用の追跡ロジック（変更なし）
         if self.VC_REPORT_TARGET_ID:
             if after.channel and after.channel.id == self.VC_REPORT_TARGET_ID:
                 if len(after.channel.members) == 1 and not self.report_vc_start_time:
