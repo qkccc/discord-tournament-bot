@@ -247,8 +247,11 @@ class VoiceLoggerCog(commands.Cog):
         members = await self._get_mention_targets(alert_channel.guild)
         # 修正後
         if members:
-            mentions = [m.mention for m in members]
-            await alert_channel.send(f"{' '.join(mentions)}\n\n**定例の時間です！**\nボイスチャンネルに集合してください。")
+            # リスト内包表記を外に出して文字列を作る
+            mentions_str = " ".join([m.mention for m in members])
+            
+            # 作った変数を f-string に埋め込むだけにする
+            await alert_channel.send(f"{mentions_str}\n\n**定例の時間です！**\nボイスチャンネルに集合してください。")
 
     @weekly_mention_task.before_loop
     async def before_weekly_mention_task(self):
