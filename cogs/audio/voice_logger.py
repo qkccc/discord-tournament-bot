@@ -245,8 +245,10 @@ class VoiceLoggerCog(commands.Cog):
         alert_channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
         if not alert_channel: return
         members = await self._get_mention_targets(alert_channel.guild)
+        # 修正後
         if members:
-            await alert_channel.send(f"{' '.join([m.mention for m in members])}\n\n**定例の時間です！**\nボイスチャンネルに集合してください。")
+            mentions = [m.mention for m in members]
+            await alert_channel.send(f"{' '.join(mentions)}\n\n**定例の時間です！**\nボイスチャンネルに集合してください。")
 
     @weekly_mention_task.before_loop
     async def before_weekly_mention_task(self):
