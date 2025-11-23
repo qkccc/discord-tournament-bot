@@ -153,10 +153,20 @@ class VoiceLoggerCog(commands.Cog):
         
         if not join_records: return
 
-        report_lines = [
-            f"`{datetime.datetime.fromisoformat(row['join_time']).astimezone(self.JST).strftime('%H:%M'):>5}` - {(guild.get_member(row['user_id']) or f'ID: {row['user_id']}').display_name}"
-            for row in join_records
-        ]
+        report_lines = []
+        for row in join_records:
+            # 時間をフォーマット
+            join_time_str = datetime.datetime.fromisoformat(row['join_time']).astimezone(self.JST).strftime('%H:%M')
+            
+            # メンバー名を取得（いなければID表示）
+            member = guild.get_member(row['user_id'])
+            if member:
+                display_name = member.display_name
+            else:
+                display_name = f"ID: {row['user_id']}"
+            
+            # 行を作成
+            report_lines.append(f"`{join_time_str:>5}` - {display_name}")
         embed = discord.Embed(title=f"'{target_vc.name}' 入室レポート", description="\n".join(report_lines), color=0x3498DB)
         embed.set_footer(text=f"通話開始時刻: {start_time_utc.astimezone(self.JST).strftime('%Y/%m/%d %H:%M')}")
         await destination_thread.send(embed=embed)
