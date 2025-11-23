@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord Bot
+After=network.target
+
+[Service]
+# rootユーザーで実行
+User=root
+# Botのフォルダ
+WorkingDirectory=/root/discord-bot
+# 実行コマンド (仮想環境のPythonを使う)
+ExecStart=/root/discord-bot/venv/bin/python3 /root/discord-bot/apeiron_bot.py
+# クラッシュしても自動で再起動
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
