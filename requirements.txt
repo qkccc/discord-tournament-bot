@@ -17,3 +17,6 @@ google-generativeai
 
 # Music Cog
 yt-dlp
+
+# requirements.txt の末尾に追加
+aiosqlite
