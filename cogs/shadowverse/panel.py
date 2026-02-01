@@ -63,13 +63,39 @@ class DatabaseManager:
 try:
     from .sv_ui import ManualRecordView
     # ConfirmDeleteViewはsv_uiにない場合があるため、必要ならここで簡易定義するかsv_uiに追加推奨ですが、一旦pass
-    class ConfirmDeleteView(ui.View): pass 
+    class ConfirmDeleteView(ui.View):
+        def __init__(self, author_id: int):
+            super().__init__(timeout=60)
+            self.author_id = author_id
+
+        @ui.button(label="本当に削除する", style=discord.ButtonStyle.danger, custom_id="sv_panel:confirm_delete")
+        async def confirm_delete(self, interaction: discord.Interaction, button: ui.Button):
+            import logging
+            logger = logging.getLogger(__name__)
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message("この操作はコマンドを実行した本人しか行えません。", ephemeral=True)
+                return
+            try:
+                # データ削除処理
+                with sqlite3.connect(DB_FILE) as conn:
+                    conn.execute("DELETE FROM sv_user_settings WHERE user_id = ?", (interaction.user.id,))
+                    conn.execute("DELETE FROM sv_matches WHERE user_id = ?", (interaction.user.id,))
+                    conn.commit()
+                await interaction.response.edit_message(content="✅ あなたの全戦績データを削除しました。", view=None)
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                logger.error(f"[ConfirmDeleteView] Exception occurred:\n{tb}")
+                try:
+                    await interaction.response.send_message(f"❌ エラーが発生しました: {e}", ephemeral=True)
+                except Exception as follow_e:
+                    logger.error(f"[ConfirmDeleteView] followup send failed: {follow_e}")
     from .sv_utils import get_stats_summary, get_recent_matches
 except ImportError:
     class ManualRecordView(ui.View): pass
     class ConfirmDeleteView(ui.View): pass
     def get_stats_summary(user_id, period): return discord.Embed(title="Error")
-    def get_recent_matches(user_id, count): return discord.Embed(title="Error")
+    def get_recent_matches(user_id, count): return (discord.Embed(title="Error"), [])
 
 
 class ChannelSelectView(ui.View):
@@ -122,21 +148,41 @@ class StatsPeriodSelectView(ui.View):
 
 class HistoryCountModal(ui.Modal, title="履歴の表示件数"):
     def __init__(self, bot_instance: commands.Bot, db_manager: DatabaseManager):
-        super().__init__(); self.bot = bot_instance; self.db_manager = db_manager
-    count_input = ui.TextInput(label="表示する件数を入力してください", placeholder="1～25の半角数字で入力...", min_length=1, max_length=2)
+        super().__init__()
+        self.bot = bot_instance
+        self.db_manager = db_manager
+        self.count_input = ui.TextInput(label="表示する件数を入力してください", placeholder="1～25の半角数字で入力...", min_length=1, max_length=2)
+        self.add_item(self.count_input)
     async def on_submit(self, interaction: discord.Interaction):
-        if not self.count_input.value.isdigit() or not (1 <= int(self.count_input.value) <= 25): return await interaction.response.send_message("❌ 1から25までの半角数字を入力してください。", ephemeral=True)
-        count = int(self.count_input.value)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        embed = await asyncio.to_thread(get_recent_matches, interaction.user.id, count)
-        target_channel_id = await self.db_manager.get_user_channel(interaction.user.id)
-        target_channel = self.bot.get_channel(target_channel_id) if target_channel_id else None
-        if target_channel:
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            if not self.count_input.value.isdigit() or not (1 <= int(self.count_input.value) <= 25):
+                return await interaction.response.send_message("❌ 1から25までの半角数字を入力してください。", ephemeral=True)
+            count = int(self.count_input.value)
+            
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            
+            embed, _ = await asyncio.to_thread(get_recent_matches, interaction.user.id, count)
+            target_channel_id = await self.db_manager.get_user_channel(interaction.user.id)
+            target_channel = self.bot.get_channel(target_channel_id) if target_channel_id else None
+            
+            if target_channel:
+                try:
+                    await target_channel.send(embed=embed)
+                    await interaction.followup.send(f"✅ 結果を {target_channel.mention} に送信しました。", ephemeral=True)
+                except discord.Forbidden:
+                    await interaction.followup.send(f"❌ 設定されたチャンネル {target_channel.mention} にメッセージを送信する権限がありません。", ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            logger.error(f"[HistoryCountModal] Exception occurred:\n{tb}")
             try:
-                await target_channel.send(embed=embed)
-                await interaction.followup.send(f"✅ 結果を {target_channel.mention} に送信しました。", ephemeral=True)
-            except discord.Forbidden: await interaction.followup.send(f"❌ 設定されたチャンネル {target_channel.mention} にメッセージを送信する権限がありません。", ephemeral=True)
-        else: await interaction.followup.send(embed=embed)
+                await interaction.followup.send(f"❌ エラーが発生しました: {e}", ephemeral=True)
+            except Exception as follow_e:
+                logger.error(f"[HistoryCountModal] followup send failed: {follow_e}")
 
 class ShadowversePersistentPanel(ui.View):
     def __init__(self, bot_instance: commands.Bot, db_manager: DatabaseManager):
@@ -166,15 +212,36 @@ class ShadowversePersistentPanel(ui.View):
 class ShadowversePanelCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Cog初期化時にDBマネージャーをインスタンス化
         self.db_manager = DatabaseManager()
-        # Bot起動時に永続Viewを登録
+        # --- パネルの永続View自動復元 ---
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sv_panel_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("SELECT message_id, channel_id FROM sv_panel_messages")
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+        for message_id, channel_id in rows:
+            try:
+                self.bot.add_view(ShadowversePersistentPanel(bot, self.db_manager), message_id=message_id)
+                print(f"[Panel復元] message_id={message_id} channel_id={channel_id}")
+            except Exception as e:
+                print(f"[Panel復元エラー] message_id={message_id} error={e}")
+        # 新規設置用のViewも登録
         self.bot.add_view(ShadowversePersistentPanel(bot, self.db_manager))
 
     @commands.command(name="svパネル設置")
     @commands.has_permissions(manage_channels=True)
     async def create_sv_panel(self, ctx: commands.Context):
-        """シャドウバース戦績管理用のボタンパネルを設置します。"""
+        """シャドウバース戦績管理用のボタンパネルを設置し、メッセージIDをDBに保存します。"""
         embed = discord.Embed(
             title="⚔️ シャドウバース 戦績管理パネル ⚔️",
             description=(
@@ -184,7 +251,25 @@ class ShadowversePanelCog(commands.Cog):
             ),
             color=discord.Color.purple()
         )
-        await ctx.send(embed=embed, view=ShadowversePersistentPanel(self.bot, self.db_manager))
+        view = ShadowversePersistentPanel(self.bot, self.db_manager)
+        message = await ctx.send(embed=embed, view=view)
+        # --- メッセージIDをDBに保存 ---
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sv_panel_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("INSERT INTO sv_panel_messages (message_id, channel_id) VALUES (?, ?)", (message.id, message.channel.id))
+            conn.commit()
+        finally:
+            conn.close()
+        await ctx.send(f"✅ パネルを設置し、メッセージID {message.id} をDBに保存しました。")
 
     # --- `!svchannel` コマンド群をこのCogに統合 ---
     @commands.group(name="svchannel", invoke_without_command=True)

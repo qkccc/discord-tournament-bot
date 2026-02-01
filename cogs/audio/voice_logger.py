@@ -226,21 +226,35 @@ class VoiceLoggerCog(commands.Cog):
 
     async def _get_mention_targets(self, guild: discord.Guild) -> list[discord.Member]:
         target_role = discord.utils.get(guild.roles, name=self.TARGET_ROLE_NAME)
-        if not target_role: return []
+        if not target_role:
+            return []
         now_jst = datetime.datetime.now(self.JST)
         days_since_sunday = (now_jst.weekday() + 1) % 7
         last_sunday_date = now_jst.date() - datetime.timedelta(days=days_since_sunday)
         since_utc = datetime.datetime.combine(last_sunday_date, datetime.time(5, 0), tzinfo=self.JST).astimezone(datetime.timezone.utc)
         users_in_vc = {member.id for channel in guild.voice_channels for member in channel.members}
         reacted_user_ids = await self.get_reacted_users_from_attendance(guild, since_utc)
-        if reacted_user_ids is None: return []
-        
+        if reacted_user_ids is None:
+            return []
+
         members_to_mention = []
         for member in target_role.members:
-            if member.bot: continue
-            if member.id not in users_in_vc and member.id not in reacted_user_ids:
-                if not await self.is_sub_account_in_vc(member.id, users_in_vc):
-                    members_to_mention.append(member)
+            if member.bot:
+                continue
+
+            # サブ垢ID一覧を取得
+            rows = await db.fetchall("SELECT sub_user_id FROM user_sub_accounts WHERE main_user_id = ?", (member.id,))
+            sub_account_ids = {row['sub_user_id'] for row in rows}
+
+            # 本人またはサブ垢がVCにいる場合は除外
+            if member.id in users_in_vc or not sub_account_ids.isdisjoint(users_in_vc):
+                continue
+
+            # 本人またはサブ垢がリアクションしている場合は除外
+            if member.id in reacted_user_ids or not sub_account_ids.isdisjoint(reacted_user_ids):
+                continue
+
+            members_to_mention.append(member)
         return members_to_mention
 
     @tasks.loop(time=MENTION_TIME_UTC)
