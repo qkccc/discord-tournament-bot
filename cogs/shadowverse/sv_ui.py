@@ -6,7 +6,7 @@ import asyncio
 import typing
 
 from .sv_constants import CLASS_NAMES, RESULTS, TURN_ORDERS, CLASS_EMOJI_MAP, TARGET_CATEGORY_ID
-from .sv_db import save_records_to_db, set_user_channel_setting, delete_match_record, delete_all_user_records, get_user_channel_setting
+from .sv_db import save_records_to_db, set_user_channel_setting, delete_match_record, delete_all_user_records, get_user_channel_setting, get_guild_season_start_date
 from .sv_utils import get_stats_summary, get_recent_matches
 
 if typing.TYPE_CHECKING:
@@ -134,8 +134,8 @@ class StatsOptionsView(ui.View):
         self.period_select = ui.Select(
             placeholder="集計期間を選択...",
             options=[
-                SelectOption(label="本日", value="today", default=True), SelectOption(label="昨日", value="yesterday"),
-                SelectOption(label="一週間", value="week"), SelectOption(label="今月", value="month"),
+                SelectOption(label="今日", value="today", default=True), SelectOption(label="昨日", value="yesterday"),
+                SelectOption(label="一週間", value="week"), SelectOption(label="今期(設定日~)", value="season"),
                 SelectOption(label="全期間", value="all")
             ], custom_id="stats_opt_period"
         )
@@ -160,8 +160,9 @@ class StatsOptionsView(ui.View):
     @ui.button(label="結果を表示", style=discord.ButtonStyle.success, custom_id="stats_opt_submit")
     async def submit(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.defer(thinking=True, ephemeral=True)
+        season_start_date = await get_guild_season_start_date(interaction.guild_id) if interaction.guild_id else None
         # 統計計算はPandas使用のため to_thread のまま
-        embed = await asyncio.to_thread(get_stats_summary, interaction.user.id, self.period, self.class_name)
+        embed = await asyncio.to_thread(get_stats_summary, interaction.user.id, self.period, self.class_name, season_start_date)
         await self.cog._send_result_embed_from_interaction(interaction, embed, force_public=True)
         await self.original_interaction.edit_original_response(content="結果を表示しました。", view=None)
         self.stop()

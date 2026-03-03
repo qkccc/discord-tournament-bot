@@ -49,15 +49,34 @@ def parse_replay_text(text: str) -> list[dict]:
         results.append({"match_time": current_match.group(0), "my_class": my_class, "opponent_class": opponent_class, "result": "WIN" if "WIN" in match_segment else "LOSE", "turn_order": "不明"})
     return results
 
-def get_stats_summary(user_id: int, period: str = "all", class_name: str | None = None) -> discord.Embed:
+def get_stats_summary(user_id: int, period: str = "all", class_name: str | None = None, season_start_date: str | None = None) -> discord.Embed:
     user_df = get_records_as_df(user_id)
     if user_df.empty: return discord.Embed(description="あなたの戦績データはまだありません。", color=discord.Color.orange())
     
     user_df['match_time'] = pd.to_datetime(user_df['match_time'], format='mixed')
     now = datetime.datetime.now(); today_business_date = (now - datetime.timedelta(hours=5)).date()
     
-    period_text_map = {"today": "今日の", "yesterday": "昨日の", "week": "過去7日間の", "month": "今月の"}
-    period_text = period_text_map.get(period, "あなたの")
+    period_text_map = {"today": "今日の", "yesterday": "昨日の", "week": "一週間の"}
+
+    def resolve_default_season_start(base_date: datetime.date) -> datetime.date:
+        if base_date.day >= 26:
+            return base_date.replace(day=26)
+        if base_date.month == 1:
+            return datetime.date(base_date.year - 1, 12, 26)
+        return datetime.date(base_date.year, base_date.month - 1, 26)
+
+    resolved_season_start_date: datetime.date | None = None
+    if period == "season":
+        if season_start_date:
+            try:
+                resolved_season_start_date = datetime.datetime.strptime(season_start_date, "%Y-%m-%d").date()
+            except ValueError:
+                resolved_season_start_date = None
+        if resolved_season_start_date is None:
+            resolved_season_start_date = resolve_default_season_start(today_business_date)
+        period_text = f"今期({resolved_season_start_date.month}/{resolved_season_start_date.day}~)の"
+    else:
+        period_text = period_text_map.get(period, "あなたの")
 
     if period != "all":
         if period == "today":
@@ -73,12 +92,10 @@ def get_stats_summary(user_id: int, period: str = "all", class_name: str | None 
             start_time = datetime.datetime.combine(today_business_date - datetime.timedelta(days=6), datetime.time(5, 0))
             end_time = datetime.datetime.combine(today_business_date, datetime.time(5, 0)) + datetime.timedelta(days=1)
             user_df = user_df[(user_df['match_time'] >= start_time) & (user_df['match_time'] < end_time)]
-        elif period == "month":
-            first_day_of_current_month = today_business_date.replace(day=1)
-            start_time = datetime.datetime.combine(first_day_of_current_month, datetime.time(5, 0))
-            # Go to the first of the next month to define the end range
-            next_month_start_day = (first_day_of_current_month.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
-            end_time = datetime.datetime.combine(next_month_start_day, datetime.time(5, 0))
+        elif period == "season":
+            start_base = resolved_season_start_date or resolve_default_season_start(today_business_date)
+            start_time = datetime.datetime.combine(start_base, datetime.time(5, 0))
+            end_time = datetime.datetime.combine(today_business_date, datetime.time(5, 0)) + datetime.timedelta(days=1)
             user_df = user_df[(user_df['match_time'] >= start_time) & (user_df['match_time'] < end_time)]
 
     if user_df.empty: return discord.Embed(description=f"{period_text}戦績データはありません。", color=discord.Color.orange())

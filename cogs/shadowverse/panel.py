@@ -91,11 +91,13 @@ try:
                 except Exception as follow_e:
                     logger.error(f"[ConfirmDeleteView] followup send failed: {follow_e}")
     from .sv_utils import get_stats_summary, get_recent_matches
+    from .sv_db import get_guild_season_start_date
 except ImportError:
     class ManualRecordView(ui.View): pass
     class ConfirmDeleteView(ui.View): pass
-    def get_stats_summary(user_id, period): return discord.Embed(title="Error")
+    def get_stats_summary(user_id, period, class_name=None, season_start_date=None): return discord.Embed(title="Error")
     def get_recent_matches(user_id, count): return (discord.Embed(title="Error"), [])
+    async def get_guild_season_start_date(guild_id): return None
 
 
 class ChannelSelectView(ui.View):
@@ -132,11 +134,12 @@ class StatsPeriodSelectView(ui.View):
     def __init__(self, author_id: int, bot_instance: commands.Bot, db_manager: DatabaseManager):
         super().__init__(timeout=60)
         self.author_id = author_id; self.bot = bot_instance; self.db_manager = db_manager
-    @ui.select(placeholder="集計期間を選択してください...",options=[discord.SelectOption(label="本日", value="today"), discord.SelectOption(label="昨日", value="yesterday"), discord.SelectOption(label="一週間", value="week"), discord.SelectOption(label="全期間", value="all")])
+    @ui.select(placeholder="集計期間を選択してください...",options=[discord.SelectOption(label="今日", value="today"), discord.SelectOption(label="昨日", value="yesterday"), discord.SelectOption(label="一週間", value="week"), discord.SelectOption(label="今期(設定日~)", value="season"), discord.SelectOption(label="全期間", value="all")])
     async def select_period(self, interaction: discord.Interaction, select: ui.Select):
         selected_period = select.values[0]
         await interaction.response.edit_message(content="統計を生成しています...", view=None)
-        embed = await asyncio.to_thread(get_stats_summary, interaction.user.id, selected_period)
+        season_start_date = await get_guild_season_start_date(interaction.guild_id) if interaction.guild_id else None
+        embed = await asyncio.to_thread(get_stats_summary, interaction.user.id, selected_period, None, season_start_date)
         target_channel_id = await self.db_manager.get_user_channel(interaction.user.id)
         target_channel = self.bot.get_channel(target_channel_id) if target_channel_id else None
         if target_channel:

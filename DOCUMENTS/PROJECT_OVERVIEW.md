@@ -111,6 +111,7 @@
 ### Shadowverse関連
 - **sv_matches**: user_id (PK), match_time (PK), my_class, opponent_class, result, turn_order … 戦績記録
 - **sv_user_settings**: user_id (PK), channel_id … 通知チャンネル設定
+- **sv_guild_settings**: guild_id (PK), season_start_date … サーバーごとの今期開始日設定
 - **sv_panel_messages**: id (PK, AUTOINC), message_id, channel_id, created_at … パネル永続化
 
 ### 通話・サブアカウント関連
@@ -146,6 +147,8 @@
 
 - `!サブ垢登録 <main_id> <sub_id>` / `!サブ垢削除 <sub_id>` / `!サブ垢一覧`
 - Shadowverseパネルの各種ボタン（手動登録・戦績表示・履歴・全データ削除・通知チャンネル設定）
+- `/stats [期間] [クラス]`（期間: 今日/昨日/一週間/今期(設定日~)/全期間）
+- `!season_start [YYYY-MM-DD]`（今期開始日の確認/変更、変更はサーバー管理権限）
 
 ---
 

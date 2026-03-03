@@ -22,6 +22,12 @@ async def async_init_database():
     await db.execute("""
         CREATE TABLE IF NOT EXISTS sv_user_settings (
             user_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL)""")
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS sv_guild_settings (
+            guild_id INTEGER PRIMARY KEY,
+            season_start_date TEXT
+        )
+    """)
 
 async def set_user_channel_setting(user_id: int, channel_id: int):
     await db.execute("INSERT OR REPLACE INTO sv_user_settings (user_id, channel_id) VALUES (?, ?)", (user_id, channel_id))
@@ -29,6 +35,16 @@ async def set_user_channel_setting(user_id: int, channel_id: int):
 async def get_user_channel_setting(user_id: int) -> int | None:
     row = await db.fetchone("SELECT channel_id FROM sv_user_settings WHERE user_id = ?", (user_id,))
     return row['channel_id'] if row else None
+
+async def set_guild_season_start_date(guild_id: int, season_start_date: str):
+    await db.execute(
+        "INSERT OR REPLACE INTO sv_guild_settings (guild_id, season_start_date) VALUES (?, ?)",
+        (guild_id, season_start_date),
+    )
+
+async def get_guild_season_start_date(guild_id: int) -> str | None:
+    row = await db.fetchone("SELECT season_start_date FROM sv_guild_settings WHERE guild_id = ?", (guild_id,))
+    return row['season_start_date'] if row else None
 
 async def save_records_to_db(user_id: int, records: list[dict]) -> tuple[list[dict], int]:
     if not records:

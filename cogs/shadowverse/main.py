@@ -4,10 +4,11 @@ from discord.ext import commands
 from discord import app_commands
 import asyncio
 import os
+import datetime
 from yomitoku import DocumentAnalyzer
 
 from .sv_constants import CLASS_NAMES
-from .sv_db import async_init_database, get_user_channel_setting, save_records_to_db
+from .sv_db import async_init_database, get_user_channel_setting, save_records_to_db, get_guild_season_start_date, set_guild_season_start_date
 from .sv_utils import extract_text_from_image, parse_replay_text, get_stats_summary, get_recent_matches
 from .sv_ui import ManualRecordView, ControlPanelView, DeleteHistoryView
 
@@ -159,8 +160,8 @@ class ShadowverseCog(commands.Cog):
     @app_commands.describe(period="集計期間", class_name="クラスを指定")
     @app_commands.choices(
         period=[
-            app_commands.Choice(name="本日", value="today"), app_commands.Choice(name="昨日", value="yesterday"),
-            app_commands.Choice(name="一週間", value="week"), app_commands.Choice(name="今月", value="month"),
+            app_commands.Choice(name="今日", value="today"), app_commands.Choice(name="昨日", value="yesterday"),
+            app_commands.Choice(name="一週間", value="week"), app_commands.Choice(name="今期(設定日~)", value="season"),
             app_commands.Choice(name="全期間", value="all"),
         ],
         class_name=[app_commands.Choice(name=cn, value=cn) for cn in CLASS_NAMES]
@@ -171,9 +172,41 @@ class ShadowverseCog(commands.Cog):
         
         selected_period = period.value if period else "today"
         selected_class = class_name.value if class_name else None
+        season_start_date = await get_guild_season_start_date(interaction.guild_id) if interaction.guild_id else None
         # 集計処理（Pandas使用）は同期的なので to_thread のまま
-        embed = await asyncio.to_thread(get_stats_summary, interaction.user.id, selected_period, selected_class)
+        embed = await asyncio.to_thread(get_stats_summary, interaction.user.id, selected_period, selected_class, season_start_date)
         await self._send_result_embed_from_interaction(interaction, embed, force_public=True)
+
+    @commands.command(name="season_start", description="今期の開始日を設定または確認します。")
+    async def season_start(self, ctx: commands.Context, start_date: str | None = None):
+        if ctx.guild is None:
+            await ctx.send("このコマンドはサーバー内でのみ利用できます。")
+            return
+
+        if start_date is None:
+            current = await get_guild_season_start_date(ctx.guild.id)
+            if current:
+                date_obj = datetime.datetime.strptime(current, "%Y-%m-%d").date()
+                label = f"{date_obj.month}/{date_obj.day}"
+                await ctx.send(f"現在の今期開始日は **{current} ({label})** です。")
+            else:
+                await ctx.send("今期開始日は未設定です（未設定時は 26日開始 で計算されます）。")
+            return
+
+        if not ctx.author.guild_permissions.manage_guild:
+            await ctx.send("この設定を変更するには「サーバー管理」権限が必要です。")
+            return
+
+        try:
+            parsed_date = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
+        except Exception:
+            await ctx.send("日付形式が不正です。`YYYY-MM-DD` で入力してください。")
+            return
+
+        await set_guild_season_start_date(ctx.guild.id, parsed_date.isoformat())
+        await ctx.send(
+            f"✅ 今期開始日を **{parsed_date.isoformat()} ({parsed_date.month}/{parsed_date.day})** に更新しました。"
+        )
 
     @app_commands.command(name="history", description="直近の戦績を指定した件数表示します。")
     @app_commands.describe(count="表示件数 (1-25)")
