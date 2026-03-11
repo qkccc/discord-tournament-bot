@@ -383,7 +383,7 @@ class DeleteHistoryView(ui.View):
                 label="選択した対戦を削除",
                 style=discord.ButtonStyle.danger,
                 custom_id="delete_history_initiate",
-                disabled=self.selected_match_time is None,
+                disabled=False,  # 常に有効化（選択チェックはボタン内で実施）
             )
             delete_button.callback = self.on_initiate_delete
             self.add_item(delete_button)
@@ -406,11 +406,18 @@ class DeleteHistoryView(ui.View):
             self.add_item(cancel_button)
 
     async def on_select(self, interaction: discord.Interaction):
+        # 値を保存するだけで、UIは更新しない（選択状態を保持）
         self.selected_match_time = interaction.data["values"][0]
-        self._update_components()
-        await interaction.response.edit_message(view=self)
+        await interaction.response.defer()
 
     async def on_initiate_delete(self, interaction: discord.Interaction):
+        # 選択チェック
+        if self.selected_match_time is None:
+            await interaction.response.send_message(
+                "❌ 削除したい対戦をプルダウンから選択してください。", ephemeral=True
+            )
+            return
+        
         self._state = "confirming"
         self._update_components()
         confirm_embed = self.original_embed.copy()

@@ -21,6 +21,7 @@ from .sv_utils import (
     get_stats_summary,
     get_recent_matches,
 )
+from .ocr_manager import OCRManager
 from .sv_ui import ManualRecordView, ControlPanelView, DeleteHistoryView
 
 
@@ -30,6 +31,8 @@ class ShadowverseCog(commands.Cog):
         self.ocr: DocumentAnalyzer | None = None
         self.model_load_task = asyncio.create_task(self._initialize_model())
         self.bot.add_view(ControlPanelView(self.bot))
+        # OCR処理の排他制御用Lock（他ユーザーと並列実行を防ぐ）
+        self.ocr_lock = asyncio.Lock()
 
         # --- 右クリックメニュー（コンテキストメニュー）の定義 ---
         # メッセージを右クリックした時に表示されるメニュー
@@ -96,11 +99,6 @@ class ShadowverseCog(commands.Cog):
         self, interaction: discord.Interaction, attachment: discord.Attachment
     ):
         """スラッシュコマンドと右クリックメニューで共通して使う画像処理ロジック"""
-        if self.ocr is None:
-            return await interaction.followup.send(
-                "OCRモデル準備中です。しばらくお待ちください。", ephemeral=True
-            )
-
         if not attachment.content_type or not attachment.content_type.startswith(
             "image/"
         ):
@@ -108,23 +106,25 @@ class ShadowverseCog(commands.Cog):
                 "画像ファイルを添付してください。", ephemeral=True
             )
 
-        temp_image_path = f"temp_{interaction.id}.png"
+        temp_image_path = f"temp_{interaction.id}_{attachment.id}.png"
         await attachment.save(temp_image_path)
 
         try:
-            # OCR処理（重い処理）
-            # 修正点: ここを async def から def に変更 (to_threadは同期関数を受け取るため)
-            def processing_task():
-                text_data = extract_text_from_image(self.ocr, temp_image_path)
-                if not text_data:
-                    return "❌ 画像からテキストを読み取れませんでした。", None
-                all_records = parse_replay_text(text_data)
-                if not all_records:
-                    return f"❌ 画像から戦績データを解析できませんでした。", None
-                return None, all_records
+            # OCR 処理（重い処理）- OCRManager を使用
+            # 排他制御：他ユーザーのOCR処理と並列実行しない
+            async with self.ocr_lock:
+                async def processing_task():
+                    # OCR マネージャーでテキストを抽出（フェイルオーバー対応）
+                    text_data = await OCRManager.extract_text_with_fallback(temp_image_path)
+                    if not text_data:
+                        return "❌ 画像からテキストを読み取れませんでした。", None
+                    all_records = parse_replay_text(text_data)
+                    if not all_records:
+                        return f"❌ 画像から戦績データを解析できませんでした。", None
+                    return None, all_records
 
-            # スレッドプールで実行して結果を待つ
-            error_msg, all_records = await asyncio.to_thread(processing_task)
+                # 非同期で実行
+                error_msg, all_records = await processing_task()
 
             if error_msg:
                 embed = discord.Embed(
@@ -202,34 +202,42 @@ class ShadowverseCog(commands.Cog):
     @app_commands.command(
         name="replay", description="Shadowverseのリプレイ画像から戦績を記録します。"
     )
+    @app_commands.describe(image="リプレイ画像（1枚のみ）")
     async def replay_record(
         self, interaction: discord.Interaction, image: discord.Attachment
     ):
-        # DMでの利用時は通常の応答、サーバー内ではephemeralな応答に
         is_dm = interaction.guild is None
         await interaction.response.defer(ephemeral=not is_dm)
-        # 共通ロジックを呼び出す
+        if not image:
+            await interaction.followup.send("画像ファイルを添付してください。", ephemeral=True)
+            return
         await self._execute_replay_processing(interaction, image)
 
     # --- 右クリックメニューのコールバック ---
     async def replay_context_menu(
         self, interaction: discord.Interaction, message: discord.Message
     ):
-        # メッセージに画像が含まれているか確認
         if not message.attachments:
             await interaction.response.send_message(
                 "❌ このメッセージには画像が添付されていません。", ephemeral=True
             )
             return
-
-        # 最初の添付ファイルを画像として処理
-        target_attachment = message.attachments[0]
-
         is_dm = interaction.guild is None
         await interaction.response.defer(ephemeral=not is_dm)
-
-        # 共通ロジックを呼び出す
-        await self._execute_replay_processing(interaction, target_attachment)
+        
+        total_images = len(message.attachments)
+        for idx, attachment in enumerate(message.attachments, 1):
+            await self._execute_replay_processing(interaction, attachment)
+            # 1枚ずつ順次処理
+        
+        # 複数画像の場合、全処理完了の合図を送信
+        if total_images > 1:
+            completion_embed = discord.Embed(
+                title="✅ 全処理完了",
+                description=f"全{total_images}枚の画像処理が完了しました。",
+                color=discord.Color.green()
+            )
+            await self._send_result_embed_from_interaction(interaction, completion_embed)
 
     @app_commands.command(name="stats", description="自分の戦績サマリーを表示します。")
     @app_commands.describe(period="集計期間", class_name="クラスを指定")
@@ -271,10 +279,8 @@ class ShadowverseCog(commands.Cog):
             interaction, embed, force_public=True
         )
 
-    @commands.command(
-        name="season_start", description="今期の開始日を設定または確認します。"
-    )
-    async def season_start(self, ctx: commands.Context, start_date: str | None = None):
+    @commands.command(name="season_start", help="今期の開始日を設定または確認します。")
+    async def season_start_text(self, ctx: commands.Context, start_date: str | None = None):
         if ctx.guild is None:
             await ctx.send("このコマンドはサーバー内でのみ利用できます。")
             return
@@ -304,6 +310,55 @@ class ShadowverseCog(commands.Cog):
         await set_guild_season_start_date(ctx.guild.id, parsed_date.isoformat())
         await ctx.send(
             f"✅ 今期開始日を **{parsed_date.isoformat()} ({parsed_date.month}/{parsed_date.day})** に更新しました。"
+        )
+
+    @app_commands.command(
+        name="season_start", description="今期の開始日を設定または確認します。"
+    )
+    @app_commands.describe(start_date="開始日 (YYYY-MM-DD形式、省略可)")
+    async def season_start_slash(
+        self, interaction: discord.Interaction, start_date: str | None = None
+    ):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "このコマンドはサーバー内でのみ利用できます。", ephemeral=True
+            )
+            return
+
+        if start_date is None:
+            current = await get_guild_season_start_date(interaction.guild.id)
+            if current:
+                date_obj = datetime.datetime.strptime(current, "%Y-%m-%d").date()
+                label = f"{date_obj.month}/{date_obj.day}"
+                await interaction.response.send_message(
+                    f"現在の今期開始日は **{current} ({label})** です。", ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    "今期開始日は未設定です（未設定時は 26日開始 で計算されます）。",
+                    ephemeral=True,
+                )
+            return
+
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "この設定を変更するには「サーバー管理」権限が必要です。",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            parsed_date = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
+        except Exception:
+            await interaction.response.send_message(
+                "日付形式が不正です。`YYYY-MM-DD` で入力してください。", ephemeral=True
+            )
+            return
+
+        await set_guild_season_start_date(interaction.guild.id, parsed_date.isoformat())
+        await interaction.response.send_message(
+            f"✅ 今期開始日を **{parsed_date.isoformat()} ({parsed_date.month}/{parsed_date.day})** に更新しました。",
+            ephemeral=True,
         )
 
     @app_commands.command(
