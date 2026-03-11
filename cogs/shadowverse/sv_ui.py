@@ -417,7 +417,7 @@ class DeleteHistoryView(ui.View):
                 "❌ 削除したい対戦をプルダウンから選択してください。", ephemeral=True
             )
             return
-        
+
         self._state = "confirming"
         self._update_components()
         confirm_embed = self.original_embed.copy()
