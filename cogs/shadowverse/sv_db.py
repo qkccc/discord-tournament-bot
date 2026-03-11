@@ -23,7 +23,9 @@ async def async_init_database():
             PRIMARY KEY (user_id, match_time))""")
 
     # 既存DBとの互換性維持: 旧sv_matchesに列が無い場合は追加
-    columns = {row["name"] for row in await db.fetchall("PRAGMA table_info(sv_matches)")}
+    columns = {
+        row["name"] for row in await db.fetchall("PRAGMA table_info(sv_matches)")
+    }
     if "my_archetype" not in columns:
         await db.execute("ALTER TABLE sv_matches ADD COLUMN my_archetype TEXT")
     if "opponent_archetype" not in columns:
