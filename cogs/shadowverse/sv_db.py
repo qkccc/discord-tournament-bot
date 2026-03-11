@@ -19,8 +19,16 @@ async def async_init_database():
     await db.execute("""
         CREATE TABLE IF NOT EXISTS sv_matches (
             user_id INTEGER NOT NULL, match_time TEXT NOT NULL, my_class TEXT,
-            opponent_class TEXT, result TEXT, turn_order TEXT,
+            my_archetype TEXT, opponent_class TEXT, opponent_archetype TEXT, result TEXT, turn_order TEXT,
             PRIMARY KEY (user_id, match_time))""")
+
+    # 既存DBとの互換性維持: 旧sv_matchesに列が無い場合は追加
+    columns = {row["name"] for row in await db.fetchall("PRAGMA table_info(sv_matches)")}
+    if "my_archetype" not in columns:
+        await db.execute("ALTER TABLE sv_matches ADD COLUMN my_archetype TEXT")
+    if "opponent_archetype" not in columns:
+        await db.execute("ALTER TABLE sv_matches ADD COLUMN opponent_archetype TEXT")
+
     await db.execute("""
         CREATE TABLE IF NOT EXISTS sv_user_settings (
             user_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL)""")
@@ -28,6 +36,15 @@ async def async_init_database():
         CREATE TABLE IF NOT EXISTS sv_guild_settings (
             guild_id INTEGER PRIMARY KEY,
             season_start_date TEXT
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS sv_class_archetypes (
+            user_id INTEGER NOT NULL,
+            class_name TEXT NOT NULL,
+            archetype TEXT NOT NULL,
+            last_used_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, class_name, archetype)
         )
     """)
 
@@ -61,6 +78,37 @@ async def get_guild_season_start_date(guild_id: int) -> str | None:
     return row["season_start_date"] if row else None
 
 
+async def save_user_class_archetype(user_id: int, class_name: str, archetype: str):
+    normalized = archetype.strip()
+    if not normalized:
+        return
+    await db.execute(
+        """
+        INSERT INTO sv_class_archetypes (user_id, class_name, archetype, last_used_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id, class_name, archetype)
+        DO UPDATE SET last_used_at = CURRENT_TIMESTAMP
+        """,
+        (user_id, class_name, normalized),
+    )
+
+
+async def get_user_class_archetypes(
+    user_id: int, class_name: str, limit: int = 8
+) -> list[str]:
+    rows = await db.fetchall(
+        """
+        SELECT archetype
+        FROM sv_class_archetypes
+        WHERE user_id = ? AND class_name = ?
+        ORDER BY last_used_at DESC
+        LIMIT ?
+        """,
+        (user_id, class_name, limit),
+    )
+    return [row["archetype"] for row in rows]
+
+
 async def save_records_to_db(
     user_id: int, records: list[dict]
 ) -> tuple[list[dict], int]:
@@ -74,14 +122,16 @@ async def save_records_to_db(
         try:
             cursor = await db.execute(
                 """
-                INSERT OR IGNORE INTO sv_matches (user_id, match_time, my_class, opponent_class, result, turn_order)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO sv_matches (user_id, match_time, my_class, my_archetype, opponent_class, opponent_archetype, result, turn_order)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     user_id,
                     record["match_time"],
                     record["my_class"],
+                    record.get("my_archetype"),
                     record["opponent_class"],
+                    record.get("opponent_archetype"),
                     record["result"],
                     record.get("turn_order", "不明"),
                 ),

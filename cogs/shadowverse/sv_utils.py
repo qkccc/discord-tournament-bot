@@ -211,6 +211,14 @@ def get_stats_summary(
         inline=False,
     )
     if not user_df.empty:
+        has_archetype_column = "opponent_archetype" in user_df.columns
+        archetype_df = user_df
+        if has_archetype_column:
+            archetype_df = user_df[
+                user_df["opponent_archetype"].notna()
+                & (user_df["opponent_archetype"].astype(str).str.strip() != "")
+            ]
+
         if class_name:
             matchup_summary = (
                 user_df.groupby("opponent_class")["result"]
@@ -232,6 +240,22 @@ def get_stats_summary(
                 value=f"```{matchup_summary}```",
                 inline=False,
             )
+
+            if not archetype_df.empty:
+                archetype_summary = (
+                    archetype_df.groupby("opponent_archetype")["result"]
+                    .apply(
+                        lambda x: (
+                            f"{(x == 'WIN').sum() / len(x) * 100:.1f}% ({(x == 'WIN').sum()}勝 / {len(x)}戦)"
+                        )
+                    )
+                    .to_string()
+                )
+                embed.add_field(
+                    name=f"{my_class_emoji}相手アーキタイプ別勝率 ({class_name})",
+                    value=f"```{archetype_summary}```",
+                    inline=False,
+                )
         else:
             class_summary = (
                 user_df.groupby("my_class")["result"]
@@ -245,6 +269,33 @@ def get_stats_summary(
             embed.add_field(
                 name="自分のクラス別勝率", value=f"```{class_summary}```", inline=False
             )
+
+            if not archetype_df.empty:
+                archetype_view_df = archetype_df.copy()
+                if "opponent_class" in archetype_view_df.columns:
+                    archetype_view_df["opponent_deck_type"] = (
+                        archetype_view_df["opponent_archetype"].astype(str).str.strip()
+                        + archetype_view_df["opponent_class"].astype(str).str.strip()
+                    )
+                    archetype_group_key = "opponent_deck_type"
+                else:
+                    archetype_group_key = "opponent_archetype"
+
+                archetype_summary = (
+                    archetype_view_df.groupby(archetype_group_key)["result"]
+                    .apply(
+                        lambda x: (
+                            f"{(x == 'WIN').sum() / len(x) * 100:.1f}% ({(x == 'WIN').sum()}勝 / {len(x)}戦)"
+                        )
+                    )
+                    .to_string()
+                )
+                embed.add_field(
+                    name="相手アーキタイプ別勝率",
+                    value=f"```{archetype_summary}```",
+                    inline=False,
+                )
+
             played_classes = sorted(user_df["my_class"].unique())
             for my_class in played_classes:
                 class_df = user_df[user_df["my_class"] == my_class]
@@ -316,9 +367,19 @@ def get_recent_matches(user_id: int, count: int) -> tuple[Embed, list[dict]]:
             if hasattr(row, "turn_order") and row.turn_order != "不明"
             else ""
         )
+        archetype_text = (
+            f" [{row.my_archetype}]"
+            if hasattr(row, "my_archetype") and row.my_archetype
+            else ""
+        )
+        opponent_archetype_text = (
+            f" [{row.opponent_archetype}]"
+            if hasattr(row, "opponent_archetype") and row.opponent_archetype
+            else ""
+        )
         match_time_str = row.match_time_dt.strftime("%m/%d %H:%M")
         descriptions.append(
-            f"{result_emoji} `{match_time_str}` {my_class_emoji} vs {opp_class_emoji} **{row.opponent_class}** {turn_order_text}"
+            f"{result_emoji} `{match_time_str}` {my_class_emoji}{archetype_text} vs {opp_class_emoji} **{row.opponent_class}**{opponent_archetype_text} {turn_order_text}"
         )
 
     embed = Embed(

@@ -14,6 +14,8 @@ from .sv_constants import (
 )
 from .sv_db import (
     save_records_to_db,
+    save_user_class_archetype,
+    get_user_class_archetypes,
     set_user_channel_setting,
     delete_match_record,
     delete_all_user_records,
@@ -31,9 +33,13 @@ class ManualRecordView(ui.View):
         super().__init__(timeout=180.0)
         self.author_id = author_id
         self.my_class = None
+        self.my_archetype = None
         self.opponent_class = None
+        self.opponent_archetype = None
         self.result = None
         self.turn_order = "不明"
+        self.my_archetype_choices: list[str] = []
+        self.opponent_archetype_choices: list[str] = []
         self.current_selection = "my_class"
         self.update_view()
 
@@ -41,8 +47,12 @@ class ManualRecordView(ui.View):
         self.clear_items()
         if self.current_selection == "my_class":
             self.add_class_buttons("my_class")
+        elif self.current_selection == "my_archetype":
+            self.add_archetype_buttons("my")
         elif self.current_selection == "opponent_class":
             self.add_class_buttons("opponent_class")
+        elif self.current_selection == "opponent_archetype":
+            self.add_archetype_buttons("opponent")
         elif self.current_selection == "result":
             self.add_choice_buttons(
                 "result",
@@ -89,6 +99,90 @@ class ManualRecordView(ui.View):
             button.callback = self.on_button_click
             self.add_item(button)
 
+    def add_archetype_buttons(self, target: str):
+        choices = (
+            self.my_archetype_choices if target == "my" else self.opponent_archetype_choices
+        )
+        for idx, archetype in enumerate(choices):
+            button = ui.Button(
+                label=archetype,
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"manual_record_saved_archetype:{target}:{idx}",
+            )
+            button.callback = self.on_saved_archetype_button_click
+            self.add_item(button)
+
+        input_label = "アーキタイプを新規入力" if choices else "アーキタイプを入力"
+        input_button = ui.Button(
+            label=input_label,
+            style=discord.ButtonStyle.primary,
+            custom_id=f"manual_record_archetype:{target}:input",
+        )
+        input_button.callback = self.on_archetype_button_click
+        self.add_item(input_button)
+
+        skip_button = ui.Button(
+            label="未入力で進む",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"manual_record_archetype:{target}:skip",
+        )
+        skip_button.callback = self.on_archetype_button_click
+        self.add_item(skip_button)
+
+    async def on_saved_archetype_button_click(self, interaction: discord.Interaction):
+        _, target, index_text = interaction.data["custom_id"].split(":")
+        index = int(index_text)
+        choices = (
+            self.my_archetype_choices if target == "my" else self.opponent_archetype_choices
+        )
+        if not (0 <= index < len(choices)):
+            await interaction.response.send_message(
+                "❌ アーキタイプ選択に失敗しました。もう一度選択してください。",
+                ephemeral=True,
+            )
+            return
+
+        selected = choices[index]
+        if target == "my":
+            self.my_archetype = selected
+            self.current_selection = "opponent_class"
+        else:
+            self.opponent_archetype = selected
+            self.current_selection = "result"
+
+        self.update_view()
+        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    async def on_archetype_button_click(self, interaction: discord.Interaction):
+        _, target, action = interaction.data["custom_id"].split(":")
+        if action == "skip":
+            if target == "my":
+                self.my_archetype = None
+                self.current_selection = "opponent_class"
+            else:
+                self.opponent_archetype = None
+                self.current_selection = "result"
+            self.update_view()
+            await interaction.response.edit_message(embed=self.create_embed(), view=self)
+            return
+
+        modal = ArchetypeInputModal(self, target=target)
+        await interaction.response.send_modal(modal)
+
+    async def _load_archetype_choices(self, target: str, class_name: str | None):
+        if not class_name:
+            if target == "my":
+                self.my_archetype_choices = []
+            else:
+                self.opponent_archetype_choices = []
+            return
+
+        choices = await get_user_class_archetypes(self.author_id, class_name)
+        if target == "my":
+            self.my_archetype_choices = choices
+        else:
+            self.opponent_archetype_choices = choices
+
     def add_confirm_buttons(self):
         continue_button = ui.Button(
             label="登録して続ける",
@@ -117,8 +211,14 @@ class ManualRecordView(ui.View):
         selection_type, value = custom_id_parts[1], custom_id_parts[2]
         setattr(self, selection_type, value)
         if self.current_selection == "my_class":
+            self.current_selection = "my_archetype"
+            await self._load_archetype_choices("my", self.my_class)
+        elif self.current_selection == "my_archetype":
             self.current_selection = "opponent_class"
         elif self.current_selection == "opponent_class":
+            self.current_selection = "opponent_archetype"
+            await self._load_archetype_choices("opponent", self.opponent_class)
+        elif self.current_selection == "opponent_archetype":
             self.current_selection = "result"
         elif self.current_selection == "result":
             self.current_selection = "turn_order"
@@ -137,7 +237,9 @@ class ManualRecordView(ui.View):
         record = {
             "match_time": datetime.datetime.now().strftime("%Y/%m/%d %H:%M"),
             "my_class": self.my_class,
+            "my_archetype": self.my_archetype,
             "opponent_class": self.opponent_class,
+            "opponent_archetype": self.opponent_archetype,
             "result": self.result,
             "turn_order": self.turn_order,
         }
@@ -146,11 +248,13 @@ class ManualRecordView(ui.View):
             await save_records_to_db(self.author_id, [record])
 
             if action == "continue":
-                self.my_class = None
                 self.opponent_class = None
+                self.opponent_archetype = None
                 self.result = None
                 self.turn_order = "不明"
-                self.current_selection = "my_class"
+                self.current_selection = (
+                    "opponent_class" if self.my_class else "my_class"
+                )
                 self.update_view()
                 await interaction.response.edit_message(
                     content="✅ 1件登録しました。続けて次の対戦を入力してください。",
@@ -183,7 +287,9 @@ class ManualRecordView(ui.View):
     def create_embed(self):
         prompts = {
             "my_class": "自分のクラスを選択してください",
+            "my_archetype": "デッキのアーキタイプを入力してください（任意）",
             "opponent_class": "相手のクラスを選択してください",
+            "opponent_archetype": "相手のデッキアーキタイプを入力してください（任意）",
             "result": "勝敗を選択してください",
             "turn_order": "先攻/後攻を選択してください",
             "confirm": "内容を確認して登録してください",
@@ -197,8 +303,18 @@ class ManualRecordView(ui.View):
             inline=True,
         )
         embed.add_field(
+            name="自分のアーキタイプ",
+            value=f"**{self.my_archetype}**" if self.my_archetype else "未入力",
+            inline=True,
+        )
+        embed.add_field(
             name="相手のクラス",
             value=self.get_class_display(self.opponent_class),
+            inline=True,
+        )
+        embed.add_field(
+            name="相手のアーキタイプ",
+            value=f"**{self.opponent_archetype}**" if self.opponent_archetype else "未入力",
             inline=True,
         )
         embed.add_field(
@@ -220,6 +336,54 @@ class ManualRecordView(ui.View):
             )
             return False
         return True
+
+
+class ArchetypeInputModal(ui.Modal, title="アーキタイプ入力"):
+    archetype = ui.TextInput(
+        label="デッキのアーキタイプ",
+        placeholder="例: 財宝 / 守護 / 連携",
+        required=False,
+        max_length=30,
+    )
+
+    def __init__(self, parent_view: ManualRecordView, target: str):
+        super().__init__()
+        self.parent_view = parent_view
+        self.target = target
+        if target == "my" and parent_view.my_archetype:
+            self.archetype.default = parent_view.my_archetype
+        elif target == "opponent" and parent_view.opponent_archetype:
+            self.archetype.default = parent_view.opponent_archetype
+
+    async def on_submit(self, interaction: discord.Interaction):
+        value = str(self.archetype.value).strip()
+        if self.target == "my":
+            self.parent_view.my_archetype = value or None
+            self.parent_view.current_selection = "opponent_class"
+            if self.parent_view.my_class and value:
+                await save_user_class_archetype(
+                    self.parent_view.author_id, self.parent_view.my_class, value
+                )
+                await self.parent_view._load_archetype_choices(
+                    "my", self.parent_view.my_class
+                )
+        else:
+            self.parent_view.opponent_archetype = value or None
+            self.parent_view.current_selection = "result"
+            if self.parent_view.opponent_class and value:
+                await save_user_class_archetype(
+                    self.parent_view.author_id, self.parent_view.opponent_class, value
+                )
+                await self.parent_view._load_archetype_choices(
+                    "opponent", self.parent_view.opponent_class
+                )
+
+        self.parent_view.update_view()
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=self.parent_view.create_embed(),
+            view=self.parent_view,
+        )
 
 
 class ChannelSelectView(ui.View):
@@ -368,7 +532,13 @@ class DeleteHistoryView(ui.View):
             options = []
             for record in self.records:
                 short_time = record["match_time"][5:]
-                label = f"{short_time} {record['my_class']} vs {record['opponent_class']} ({record['result']})"
+                my_archetype = record.get("my_archetype")
+                my_archetype_text = f" [{my_archetype}]" if my_archetype else ""
+                opponent_archetype = record.get("opponent_archetype")
+                opponent_archetype_text = (
+                    f" [{opponent_archetype}]" if opponent_archetype else ""
+                )
+                label = f"{short_time} {record['my_class']}{my_archetype_text} vs {record['opponent_class']}{opponent_archetype_text} ({record['result']})"
                 options.append(SelectOption(label=label, value=record["match_time"]))
 
             select_menu = ui.Select(
@@ -428,7 +598,13 @@ class DeleteHistoryView(ui.View):
         )
         info_text = f"`{self.selected_match_time}`"
         if selected_record_info:
-            info_text = f"`{selected_record_info['match_time']}`\n{selected_record_info['my_class']} vs {selected_record_info['opponent_class']} ({selected_record_info['result']})"
+            my_archetype = selected_record_info.get("my_archetype")
+            my_archetype_text = f" [{my_archetype}]" if my_archetype else ""
+            opponent_archetype = selected_record_info.get("opponent_archetype")
+            opponent_archetype_text = (
+                f" [{opponent_archetype}]" if opponent_archetype else ""
+            )
+            info_text = f"`{selected_record_info['match_time']}`\n{selected_record_info['my_class']}{my_archetype_text} vs {selected_record_info['opponent_class']}{opponent_archetype_text} ({selected_record_info['result']})"
         confirm_embed.description = (
             f"**以下の対戦記録を本当に削除しますか？**\n\n{info_text}"
         )
