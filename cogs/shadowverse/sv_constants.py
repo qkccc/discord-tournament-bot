@@ -2,21 +2,10 @@
 import discord
 
 from cogs.utils.constants import DB_FILE
-
-CLASS_NAMES = [
-    "エルフ",
-    "ロイヤル",
-    "ウィッチ",
-    "ドラゴン",
-    "ナイトメア",
-    "ビショップ",
-    "ネメシス",
-]
+CLASS_NAMES = ["エルフ", "ロイヤル", "ウィッチ", "ドラゴン", "ナイトメア", "ビショップ", "ネメシス"]
 TURN_ORDERS = ["先攻", "後攻", "不明"]
 RESULTS = ["WIN", "LOSE"]
-TARGET_CATEGORY_ID = (
-    1003574017900417094  # 通知先として選択できるチャンネルが含まれるカテゴリID
-)
+TARGET_CATEGORY_ID = 1003574017900417094 # 通知先として選択できるチャンネルが含まれるカテゴリID
 
 CLASS_EMOJI_MAP = {
     "エルフ": (922142168473301082, "Class_Forestcraft"),
@@ -25,9 +14,8 @@ CLASS_EMOJI_MAP = {
     "ドラゴン": (922142264942284830, "Class_Dragoncraft"),
     "ナイトメア": (1410146572930519040, "Class_Abysscraft"),
     "ビショップ": (922142398073700433, "Class_Havencraft"),
-    "ネメシス": (922142424380346399, "Class_Portalcraft"),
+    "ネメシス": (922142424380346399, "Class_Portalcraft")
 }
-
 
 def get_class_emoji(class_name: str) -> discord.PartialEmoji | None:
     """クラス名に対応するPartialEmojiを取得します。"""

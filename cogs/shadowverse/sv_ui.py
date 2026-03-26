@@ -101,9 +101,7 @@ class ManualRecordView(ui.View):
 
     def add_archetype_buttons(self, target: str):
         choices = (
-            self.my_archetype_choices
-            if target == "my"
-            else self.opponent_archetype_choices
+            self.my_archetype_choices if target == "my" else self.opponent_archetype_choices
         )
         for idx, archetype in enumerate(choices):
             button = ui.Button(
@@ -135,9 +133,7 @@ class ManualRecordView(ui.View):
         _, target, index_text = interaction.data["custom_id"].split(":")
         index = int(index_text)
         choices = (
-            self.my_archetype_choices
-            if target == "my"
-            else self.opponent_archetype_choices
+            self.my_archetype_choices if target == "my" else self.opponent_archetype_choices
         )
         if not (0 <= index < len(choices)):
             await interaction.response.send_message(
@@ -167,9 +163,7 @@ class ManualRecordView(ui.View):
                 self.opponent_archetype = None
                 self.current_selection = "result"
             self.update_view()
-            await interaction.response.edit_message(
-                embed=self.create_embed(), view=self
-            )
+            await interaction.response.edit_message(embed=self.create_embed(), view=self)
             return
 
         modal = ArchetypeInputModal(self, target=target)
@@ -320,9 +314,7 @@ class ManualRecordView(ui.View):
         )
         embed.add_field(
             name="相手のアーキタイプ",
-            value=f"**{self.opponent_archetype}**"
-            if self.opponent_archetype
-            else "未入力",
+            value=f"**{self.opponent_archetype}**" if self.opponent_archetype else "未入力",
             inline=True,
         )
         embed.add_field(
