@@ -12,7 +12,7 @@ def create_bracket_image_from_db(guild_id: int, db: DatabaseManager) -> discord.
     if not tournament_info: return None
     
     matches_data = db.fetchall("SELECT * FROM se_matches WHERE guild_id = ? ORDER BY round_num, match_in_round", (guild_id,))
-    players_data = db.fetchall("SELECT user_id, display_name FROM players WHERE guild_id = ?", (guild_id,))
+    players_data = db.fetchall("SELECT user_id, display_name FROM event_players WHERE guild_id = ?", (guild_id,))
     
     player_map = {p["user_id"]: p["display_name"] for p in players_data}
     player_map[None] = " "

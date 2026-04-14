@@ -71,6 +71,54 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         except Exception as e:
             log.error(f"大会アーカイブ中にエラー: {e}")
 
+    async def _resolve_se_player(self, guild_id: int, user_id: int):
+        """SEトーナメント用にプレイヤー情報を解決する"""
+        player_row = self.db.fetchone(
+            "SELECT display_name, is_dummy FROM event_players WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id)
+        )
+        if not player_row:
+            return None
+
+        if player_row["is_dummy"]:
+            dummy = DummyPlayer(player_row["display_name"])
+            dummy.id = user_id
+            return dummy
+
+        guild = self.bot.get_guild(guild_id)
+        member = guild.get_member(user_id) if guild else None
+        if member:
+            return member
+
+        try:
+            return await self.bot.fetch_user(user_id)
+        except (discord.NotFound, discord.HTTPException):
+            return None
+
+    async def _send_ready_se_match_cards(self, guild_id: int, match_ch: discord.TextChannel):
+        """対戦可能なSEマッチの勝利報告カードを送信する"""
+        for match in self.db.fetchall("SELECT * FROM se_matches WHERE guild_id = ? ORDER BY round_num, match_in_round", (guild_id,)):
+            if match["is_bye"] or match["winner_id"] is not None:
+                continue
+            if not match["player1_id"] or not match["player2_id"]:
+                continue
+
+            p1 = await self._resolve_se_player(guild_id, match["player1_id"])
+            p2 = await self._resolve_se_player(guild_id, match["player2_id"])
+            if not p1 or not p2:
+                log.warning(f"Guild {guild_id}: 対戦カード送信時に参加者を解決できませんでした (match_id={match['match_id']})")
+                continue
+
+            if await self._se_match_card_exists(match_ch, match["round_num"], p1.display_name, p2.display_name):
+                continue
+
+            embed = discord.Embed(
+                title=f"【第{match['round_num']}回戦】 {p1.display_name} vs {p2.display_name}",
+                description="対戦後、勝者が自身の勝利ボタンを押してください。"
+            )
+            view = ResultReportView(guild_id, match["match_id"], Player(p1), Player(p2))
+            await match_ch.send(embed=embed, view=view)
+
     # ==============================================================================
     # 既存のヘルパーメソッド、リスナー、コマンド
     # ==============================================================================
@@ -277,6 +325,56 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         # 修正: テーブル名 event_settings
         self.db.execute("INSERT INTO event_settings (guild_id, match_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET match_channel_id = excluded.match_channel_id", (ctx.guild.id, ctx.channel.id))
         await ctx.send(f"✅ 対戦カード送信用チャンネルを `#{ctx.channel.name}` に設定しました。")
+
+    @commands.command(name='トーナメント再送', help='進行中のトーナメントの対戦カードを全件再送します。')
+    @commands.has_permissions(manage_guild=True)
+    async def resend_missing_tournament_cards(self, ctx: commands.Context):
+        guild_id = ctx.guild.id
+        if not self.db.fetchone("SELECT 1 FROM se_tournaments WHERE guild_id = ? AND is_active = 1", (guild_id,)):
+            return await ctx.send("進行中のトーナメントが見つかりません。")
+
+        main_ch, match_ch = await self._get_channels(guild_id)
+        if not main_ch:
+            main_ch = ctx.channel
+        if not match_ch:
+            match_ch = ctx.channel
+
+        sent_count = 0
+        async for match in self._iter_ready_se_matches(guild_id):
+            embed = discord.Embed(
+                title=f"【第{match['round_num']}回戦】 {match['p1_name']} vs {match['p2_name']}",
+                description="対戦後、勝者が自身の勝利ボタンを押してください。"
+            )
+            view = ResultReportView(guild_id, match["match_id"], match["p1_obj"], match["p2_obj"])
+            await match_ch.send(embed=embed, view=view)
+            sent_count += 1
+
+        if main_ch.id != match_ch.id:
+            await main_ch.send(f"対戦カードを <#{match_ch.id}> に送信しました。")
+
+        await ctx.send(f"✅ 再送を完了しました。再生成: {sent_count}件")
+
+    async def _iter_ready_se_matches(self, guild_id: int):
+        """再送対象のSEマッチを順に返す"""
+        for match in self.db.fetchall("SELECT * FROM se_matches WHERE guild_id = ? ORDER BY round_num, match_in_round", (guild_id,)):
+            if match["is_bye"] or match["winner_id"] is not None:
+                continue
+            if not match["player1_id"] or not match["player2_id"]:
+                continue
+
+            p1 = await self._resolve_se_player(guild_id, match["player1_id"])
+            p2 = await self._resolve_se_player(guild_id, match["player2_id"])
+            if not p1 or not p2:
+                continue
+
+            yield {
+                "match_id": match["match_id"],
+                "round_num": match["round_num"],
+                "p1_name": p1.display_name,
+                "p2_name": p2.display_name,
+                "p1_obj": Player(p1),
+                "p2_obj": Player(p2),
+            }
     
     @commands.command(name='追加', help='募集中のリストにダミーの参加者を追加します。例: !追加 太郎')
     @commands.has_permissions(manage_guild=True)
@@ -609,14 +707,12 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             if not main_ch: main_ch = interaction.channel
             if not match_ch: match_ch = interaction.channel
             
-            if image_file: await main_ch.send(f"**トーナメント開始！** (参加者: {num_players}人)", file=image_file)
+            if image_file:
+                bracket_msg = await main_ch.send(f"**トーナメント開始！** (参加者: {num_players}人)", file=image_file)
+                self.db.execute("UPDATE se_tournaments SET bracket_message_id = ? WHERE guild_id = ?", (bracket_msg.id, guild_id))
             else: await main_ch.send("トーナメント表の生成に失敗しました。")
             
-            for match in self.db.fetchall("SELECT * FROM se_matches WHERE guild_id = ? AND round_num = 1 ORDER BY match_in_round", (guild_id,)):
-                if not match["is_bye"]:
-                    p1 = Player(next(p for p in participants_set if p.id == match["player1_id"])); p2 = Player(next(p for p in participants_set if p.id == match["player2_id"]))
-                    embed = discord.Embed(title=f"【第{match['round_num']}回戦】 {p1.display_name} vs {p2.display_name}", description="対戦後、勝者が自身の勝利ボタンを押してください。"); view = ResultReportView(guild_id, match["match_id"], p1, p2)
-                    await match_ch.send(embed=embed, view=view)
+            await self._send_ready_se_match_cards(guild_id, match_ch)
             
             if main_ch.id != match_ch.id: await main_ch.send(f"対戦カードを <#{match_ch.id}> に送信しました。")
 
@@ -643,12 +739,10 @@ class EventManagerCog(commands.Cog, name="EventManager"):
                     self.db.execute(f"UPDATE se_matches SET {column} = ? WHERE guild_id = ? AND match_id = ?", (winner_id, guild_id, next_match_id))
                     updated_next_match = self.db.fetchone("SELECT * FROM se_matches WHERE guild_id = ? AND match_id = ?", (guild_id, next_match_id))
                     if updated_next_match["player1_id"] and updated_next_match["player2_id"]:
-                        async def get_p_obj(pid):
-                            # 修正: テーブル名 event_players
-                            d = self.db.fetchone("SELECT display_name, is_dummy FROM event_players WHERE guild_id = ? AND user_id = ?", (guild_id, pid))
-                            if d['is_dummy']: obj = DummyPlayer(d['display_name']); obj.id=pid; return obj
-                            return await self.bot.fetch_user(pid)
-                        p1, p2 = await get_p_obj(updated_next_match["player1_id"]), await get_p_obj(updated_next_match["player2_id"])
+                        p1 = await self._resolve_se_player(guild_id, updated_next_match["player1_id"])
+                        p2 = await self._resolve_se_player(guild_id, updated_next_match["player2_id"])
+                        if not p1 or not p2:
+                            raise ValueError(f"次ラウンドの参加者解決に失敗しました: {next_match_id}")
                         embed = discord.Embed(title=f"【第{updated_next_match['round_num']}回戦】 {p1.display_name} vs {p2.display_name}", description="対戦の準備ができました。"); view = ResultReportView(guild_id, next_match_id, Player(p1), Player(p2))
                         await match_ch.send(embed=embed, view=view)
                         if main_ch.id != match_ch.id: await main_ch.send(f"新しい対戦カードが <#{match_ch.id}> に作成されました。")
@@ -656,10 +750,13 @@ class EventManagerCog(commands.Cog, name="EventManager"):
                 image_file = await self.bot.loop.run_in_executor(None, create_bracket_image_from_db, guild_id, self.db)
                 if image_file:
                     tourney_info = self.db.fetchone("SELECT bracket_message_id FROM se_tournaments WHERE guild_id = ?", (guild_id,))
+                    bracket_message_id = tourney_info["bracket_message_id"] if tourney_info else None
                     try:
-                        msg_to_edit = await main_ch.fetch_message(tourney_info["bracket_message_id"])
+                        if bracket_message_id is None:
+                            raise ValueError("bracket_message_id is None")
+                        msg_to_edit = await main_ch.fetch_message(int(bracket_message_id))
                         await msg_to_edit.edit(content="**トーナメント表更新**", attachments=[image_file])
-                    except (discord.NotFound, discord.Forbidden):
+                    except (ValueError, TypeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
                         new_msg = await main_ch.send("**トーナメント表更新**", file=image_file)
                         self.db.execute("UPDATE se_tournaments SET bracket_message_id = ? WHERE guild_id = ?", (new_msg.id, guild_id))
                 
