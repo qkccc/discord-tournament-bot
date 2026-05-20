@@ -10,7 +10,9 @@ class SCLPosterAnnouncementCog(commands.Cog, name="SCLPosterAnnouncement"):
     JST = datetime.timezone(datetime.timedelta(hours=9))
     POSTER_CHANNEL_ID = 857079592354709534
     ANNOUNCE_TIME_JST = datetime.time(hour=20, minute=55, tzinfo=JST)
-    SCHEDULE_FILE = Path(__file__).resolve().parents[2] / "data" / "scl_poster_schedule.json"
+    SCHEDULE_FILE = (
+        Path(__file__).resolve().parents[2] / "data" / "scl_poster_schedule.json"
+    )
 
     def __init__(self, bot):
         self.bot = bot
@@ -60,7 +62,9 @@ class SCLPosterAnnouncementCog(commands.Cog, name="SCLPosterAnnouncement"):
             return
 
         message = self._build_announcement_text(schedule)
-        await channel.send(message, allowed_mentions=discord.AllowedMentions(everyone=True))
+        await channel.send(
+            message, allowed_mentions=discord.AllowedMentions(everyone=True)
+        )
 
     @poster_announcement_task.before_loop
     async def before_poster_announcement_task(self):
