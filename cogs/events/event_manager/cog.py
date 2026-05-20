@@ -982,7 +982,12 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         final_round = (
             tournament.max_rounds > 0 and tournament.round_num >= tournament.max_rounds
         )
-        one_winner = len(undefeated) == 1 and tournament.round_num > 0
+        # ラウンド数が未入力(max_rounds == 0)の場合のみ、全勝者1名で終了
+        one_winner = (
+            len(undefeated) == 1
+            and tournament.round_num > 0
+            and tournament.max_rounds == 0
+        )
         no_winners = (
             len(undefeated) == 0 and tournament.players and tournament.round_num > 0
         )
