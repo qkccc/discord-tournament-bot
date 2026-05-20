@@ -2,6 +2,7 @@
 大会コマンド用の共通ユーティリティ
 デバッグモード時の出力チャンネル制御など
 """
+
 import discord
 from typing import Optional
 
@@ -31,7 +32,11 @@ class DebugOutputController:
 
     def get_debug_channel_id(self, guild_id: int) -> Optional[int]:
         """デバッグチャンネルを取得"""
-        return self.debug_channel.get(guild_id) if self.is_debug_enabled(guild_id) else None
+        return (
+            self.debug_channel.get(guild_id)
+            if self.is_debug_enabled(guild_id)
+            else None
+        )
 
     async def get_output_channel(
         self, bot: discord.Client, guild_id: int, default_channel: discord.TextChannel

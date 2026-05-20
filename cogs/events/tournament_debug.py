@@ -2,6 +2,7 @@
 大会用デバッグコマンド
 ダミー参加者の追加、デバッグモード管理など
 """
+
 import discord
 from discord.ext import commands
 from .event_manager.models import DummyPlayer
@@ -34,13 +35,15 @@ class TournamentDebugCog(commands.Cog, name="TournamentDebug"):
         embed = discord.Embed(
             title="デバッグモード",
             description=desc,
-            color=0x00ff00 if is_enabled else 0xff0000
+            color=0x00FF00 if is_enabled else 0xFF0000,
         )
         await ctx.send(embed=embed)
 
     @commands.command(name="add_dummy")
     @commands.has_permissions(administrator=True)
-    async def add_dummy_players(self, ctx: commands.Context, count: int, name_prefix: str = "Dummy"):
+    async def add_dummy_players(
+        self, ctx: commands.Context, count: int, name_prefix: str = "Dummy"
+    ):
         """ダミー参加者を追加"""
         if count <= 0 or count > 100:
             await ctx.send("参加者数は 1～100 の間で指定してください。")
@@ -50,20 +53,20 @@ class TournamentDebugCog(commands.Cog, name="TournamentDebug"):
         dummy_players = []
 
         for i in range(count):
-            dummy_name = f"{name_prefix}_{i+1}"
+            dummy_name = f"{name_prefix}_{i + 1}"
             dummy = DummyPlayer(dummy_name)
             dummy_players.append((dummy_name, dummy.id))
 
             # DB に追加
             db.execute(
                 "INSERT OR IGNORE INTO event_players (guild_id, user_id, display_name, is_dummy) VALUES (?, ?, ?, ?)",
-                (guild_id, dummy.id, dummy_name, True)
+                (guild_id, dummy.id, dummy_name, True),
             )
 
         embed = discord.Embed(
             title="ダミー参加者を追加",
             description=f"{count}人のダミー参加者を追加しました。",
-            color=0x00aaff
+            color=0x00AAFF,
         )
         for name, uid in dummy_players[:5]:
             embed.add_field(name="", value=f"・{name} (ID: {uid})", inline=False)
@@ -81,7 +84,7 @@ class TournamentDebugCog(commands.Cog, name="TournamentDebug"):
 
         dummies = db.fetchall(
             "SELECT user_id FROM event_players WHERE guild_id = ? AND is_dummy = ?",
-            (guild_id, True)
+            (guild_id, True),
         )
 
         count = len(dummies)
@@ -89,13 +92,13 @@ class TournamentDebugCog(commands.Cog, name="TournamentDebug"):
         for dummy in dummies:
             db.execute(
                 "DELETE FROM event_players WHERE guild_id = ? AND user_id = ?",
-                (guild_id, dummy['user_id'])
+                (guild_id, dummy["user_id"]),
             )
 
         embed = discord.Embed(
             title="ダミー参加者を削除",
             description=f"{count}人のダミー参加者を削除しました。",
-            color=0xff6600
+            color=0xFF6600,
         )
         await ctx.send(embed=embed)
 
@@ -107,35 +110,43 @@ class TournamentDebugCog(commands.Cog, name="TournamentDebug"):
 
         players = db.fetchall(
             "SELECT display_name, is_dummy FROM event_players WHERE guild_id = ? ORDER BY is_dummy, display_name",
-            (guild_id,)
+            (guild_id,),
         )
 
         if not players:
             await ctx.send("参加者がいません。")
             return
 
-        embed = discord.Embed(title="参加者一覧", color=0x0099ff)
+        embed = discord.Embed(title="参加者一覧", color=0x0099FF)
 
-        real_players = [p for p in players if not p['is_dummy']]
-        dummy_players = [p for p in players if p['is_dummy']]
+        real_players = [p for p in players if not p["is_dummy"]]
+        dummy_players = [p for p in players if p["is_dummy"]]
 
         if real_players:
-            real_names = "\n".join([f"✅ {p['display_name']}" for p in real_players[:10]])
+            real_names = "\n".join(
+                [f"✅ {p['display_name']}" for p in real_players[:10]]
+            )
             if len(real_players) > 10:
                 real_names += f"\n・他 {len(real_players) - 10}人"
-            embed.add_field(name=f"実プレイヤー ({len(real_players)}人)", value=real_names, inline=False)
+            embed.add_field(
+                name=f"実プレイヤー ({len(real_players)}人)",
+                value=real_names,
+                inline=False,
+            )
 
         if dummy_players:
-            dummy_names = "\n".join([f"🤖 {p['display_name']}" for p in dummy_players[:10]])
+            dummy_names = "\n".join(
+                [f"🤖 {p['display_name']}" for p in dummy_players[:10]]
+            )
             if len(dummy_players) > 10:
                 dummy_names += f"\n・他 {len(dummy_players) - 10}人"
-            embed.add_field(name=f"ダミー参加者 ({len(dummy_players)}人)", value=dummy_names, inline=False)
+            embed.add_field(
+                name=f"ダミー参加者 ({len(dummy_players)}人)",
+                value=dummy_names,
+                inline=False,
+            )
 
-        embed.add_field(
-            name="合計",
-            value=f"**{len(players)}人**",
-            inline=False
-        )
+        embed.add_field(name="合計", value=f"**{len(players)}人**", inline=False)
 
         await ctx.send(embed=embed)
 
