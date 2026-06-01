@@ -429,7 +429,9 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         view = MainControlView(self)
         # デバッグモードが有効ならデバッグ用チャンネルに出力する
         try:
-            out_ch = await debug_controller.get_output_channel(self.bot, ctx.guild.id, ctx.channel)
+            out_ch = await debug_controller.get_output_channel(
+                self.bot, ctx.guild.id, ctx.channel
+            )
         except Exception:
             out_ch = ctx.channel
 
@@ -1016,7 +1018,9 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             if one_winner:
                 msg = f"🎉 **優勝者決定！** 🎉\n全勝者が **{undefeated[0].display_name}** さん1名となったため、大会は終了です！"
             elif no_winners:
-                msg = f"第{tournament.round_num}ラウンドが終了したため、大会は終了です！"
+                msg = (
+                    f"第{tournament.round_num}ラウンドが終了したため、大会は終了です！"
+                )
             else:
                 msg = f"規定の {tournament.max_rounds} ラウンドが終了しました！"
 
