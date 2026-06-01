@@ -23,6 +23,7 @@ from .views import (
     SwissResultReportView,
 )
 from .image_utils import create_bracket_image_from_db
+from ..debug_controller import debug_controller
 
 log = logging.getLogger(__name__)
 
@@ -426,12 +427,18 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             color=0x7289DA,
         )
         view = MainControlView(self)
-        msg = await ctx.send(embed=embed, view=view)
+        # デバッグモードが有効ならデバッグ用チャンネルに出力する
+        try:
+            out_ch = await debug_controller.get_output_channel(self.bot, ctx.guild.id, ctx.channel)
+        except Exception:
+            out_ch = ctx.channel
+
+        msg = await out_ch.send(embed=embed, view=view)
         await msg.add_reaction("👍")
 
         self.recruit_sessions[ctx.guild.id] = {
             "message_id": msg.id,
-            "channel_id": ctx.channel.id,
+            "channel_id": out_ch.id,
             "participants": set(),
         }
         # 修正: テーブル名 event_recruitments
@@ -460,6 +467,19 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         )
         main_ch = self.bot.get_channel(main_ch_id)
         match_ch = self.bot.get_channel(match_ch_id) if match_ch_id else main_ch
+
+        # デバッグモードが有効な場合は、デバッグ用チャンネルに出力する
+        try:
+            if debug_controller.is_debug_enabled(guild_id):
+                dbg_ch_id = debug_controller.get_debug_channel_id(guild_id)
+                if dbg_ch_id:
+                    dbg_ch = self.bot.get_channel(dbg_ch_id)
+                    if dbg_ch:
+                        return dbg_ch, dbg_ch
+        except Exception:
+            # デバッグ制御に問題があっても通常のチャンネルを返す
+            pass
+
         return main_ch, match_ch
 
     @commands.command(name="sd設定メイン", help="アナウンス用チャンネルを設定します。")
@@ -996,7 +1016,7 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             if one_winner:
                 msg = f"🎉 **優勝者決定！** 🎉\n全勝者が **{undefeated[0].display_name}** さん1名となったため、大会は終了です！"
             elif no_winners:
-                msg = "全勝者がいなくなりました。これにて大会は終了です！"
+                msg = f"第{tournament.round_num}ラウンドが終了したため、大会は終了です！"
             else:
                 msg = f"規定の {tournament.max_rounds} ラウンドが終了しました！"
 

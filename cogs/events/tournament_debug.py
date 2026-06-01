@@ -50,16 +50,37 @@ class TournamentDebugCog(commands.Cog, name="TournamentDebug"):
             return
 
         guild_id = ctx.guild.id
+        
+        # イベントマネージャーCogを取得
+        cog = self.bot.get_cog("EventManager")
+        if not cog:
+            await ctx.send("❌ イベントマネージャーCogが見つかりません。")
+            return
+        
+        session = cog.recruit_sessions.get(guild_id)
+        if not session:
+            await ctx.send("❌ 参加者募集中のイベントがありません。")
+            return
+
         dummy_players = []
 
         for i in range(count):
             dummy_name = f"{name_prefix}_{i + 1}"
             dummy = DummyPlayer(dummy_name)
             dummy_players.append((dummy_name, dummy.id))
+            
+            # 募集セッションに追加
+            session["participants"].add(dummy)
 
             # DB に追加
             db.execute(
                 "INSERT OR IGNORE INTO event_players (guild_id, user_id, display_name, is_dummy) VALUES (?, ?, ?, ?)",
+                (guild_id, dummy.id, dummy_name, True),
+            )
+            
+            # event_participants にも追加
+            db.execute(
+                "INSERT OR IGNORE INTO event_participants (guild_id, user_id, display_name, is_dummy) VALUES (?, ?, ?, ?)",
                 (guild_id, dummy.id, dummy_name, True),
             )
 
@@ -75,6 +96,9 @@ class TournamentDebugCog(commands.Cog, name="TournamentDebug"):
             embed.add_field(name="", value=f"・他 {count - 5}人", inline=False)
 
         await ctx.send(embed=embed)
+        
+        # 募集メッセージを更新
+        await cog._update_recruitment_message(guild_id)
 
     @commands.command(name="clear_dummies")
     @commands.has_permissions(administrator=True)
@@ -82,6 +106,23 @@ class TournamentDebugCog(commands.Cog, name="TournamentDebug"):
         """すべてのダミー参加者を削除"""
         guild_id = ctx.guild.id
 
+        # イベントマネージャーCogを取得
+        cog = self.bot.get_cog("EventManager")
+        if not cog:
+            await ctx.send("❌ イベントマネージャーCogが見つかりません。")
+            return
+        
+        session = cog.recruit_sessions.get(guild_id)
+        if not session:
+            await ctx.send("❌ 参加者募集中のイベントがありません。")
+            return
+
+        # 募集セッションからダミーを削除
+        dummies_to_remove = [p for p in session["participants"] if isinstance(p, DummyPlayer)]
+        for dummy in dummies_to_remove:
+            session["participants"].remove(dummy)
+
+        # DB からダミーを削除
         dummies = db.fetchall(
             "SELECT user_id FROM event_players WHERE guild_id = ? AND is_dummy = ?",
             (guild_id, True),
@@ -94,13 +135,20 @@ class TournamentDebugCog(commands.Cog, name="TournamentDebug"):
                 "DELETE FROM event_players WHERE guild_id = ? AND user_id = ?",
                 (guild_id, dummy["user_id"]),
             )
+            db.execute(
+                "DELETE FROM event_participants WHERE guild_id = ? AND user_id = ?",
+                (guild_id, dummy["user_id"]),
+            )
 
         embed = discord.Embed(
             title="ダミー参加者を削除",
             description=f"{count}人のダミー参加者を削除しました。",
-            color=0xFF6600,
+            color=0xff6600,
         )
         await ctx.send(embed=embed)
+        
+        # 募集メッセージを更新
+        await cog._update_recruitment_message(guild_id)
 
     @commands.command(name="list_participants")
     @commands.has_permissions(administrator=True)
