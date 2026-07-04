@@ -153,15 +153,13 @@ class ChannelSelectView(ui.View):
         super().__init__(timeout=120.0)
         self.author_id = author_id
         self.db_manager = db_manager
-        options = [
-            discord.SelectOption(label=ch.name, value=str(ch.id))
-            for ch in channels[:25]
-        ]
-        self.select_menu = ui.Select(
-            placeholder="通知先にしたいチャンネルを選択してください...", options=options
-        )
-        self.select_menu.callback = self.on_select_submit
-        self.add_item(self.select_menu)
+        # ページング対応: Discord の Select は最大25選択肢までしか持てないため、
+        # カテゴリ内のチャンネルが多い場合はページ切替で全件参照できるようにする
+        self.channels = channels
+        self.per_page = 25
+        self.page = 0
+        self.select_menu: ui.Select | None = None
+        self._build_view()
 
     async def on_select_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -183,6 +181,89 @@ class ChannelSelectView(ui.View):
             )
             return False
         return True
+
+    def _build_view(self):
+        # 既存の子要素をクリアして再構築
+        for child in list(self.children):
+            try:
+                self.remove_item(child)
+            except Exception:
+                pass
+
+        start = self.page * self.per_page
+        end = start + self.per_page
+        page_channels = self.channels[start:end]
+
+        options = []
+        for ch in page_channels:
+            # description に ID を入れて識別を容易にする
+            options.append(
+                discord.SelectOption(
+                    label=ch.name, value=str(ch.id), description=f"ID: {ch.id}"
+                )
+            )
+
+        # 選択肢が空の場合は代替のメッセージ表示用のボタンのみを残す
+        if options:
+            self.select_menu = ui.Select(
+                placeholder=f"通知先にしたいチャンネルを選択してください... (ページ {self.page + 1})",
+                options=options,
+            )
+            self.select_menu.callback = self.on_select_submit
+            self.add_item(self.select_menu)
+
+        # ページ移動ボタン
+        prev_disabled = self.page <= 0
+        next_disabled = end >= len(self.channels)
+
+        self.add_item(
+            ui.Button(
+                label="◀️ 前のページ",
+                style=discord.ButtonStyle.secondary,
+                disabled=prev_disabled,
+                custom_id=f"sv_channel_prev:{self.page}",
+            )
+        )
+        self.add_item(
+            ui.Button(
+                label="次のページ ▶️",
+                style=discord.ButtonStyle.secondary,
+                disabled=next_disabled,
+                custom_id=f"sv_channel_next:{self.page}",
+            )
+        )
+
+    @ui.button(
+        label="◀️ 前のページ",
+        style=discord.ButtonStyle.secondary,
+        custom_id="sv_channel_prev_button",
+    )
+    async def _prev_page(self, interaction: discord.Interaction, button: ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                "この操作はコマンドを実行した本人しか行えません。", ephemeral=True
+            )
+        if self.page <= 0:
+            return await interaction.response.defer()
+        self.page -= 1
+        self._build_view()
+        await interaction.response.edit_message(content=None, view=self)
+
+    @ui.button(
+        label="次のページ ▶️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="sv_channel_next_button",
+    )
+    async def _next_page(self, interaction: discord.Interaction, button: ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                "この操作はコマンドを実行した本人しか行えません。", ephemeral=True
+            )
+        if (self.page + 1) * self.per_page >= len(self.channels):
+            return await interaction.response.defer()
+        self.page += 1
+        self._build_view()
+        await interaction.response.edit_message(content=None, view=self)
 
 
 # (以降のView, ModalもDBマネージャーを使うように修正済み)
