@@ -113,9 +113,12 @@ class ShadowverseCog(commands.Cog):
             # OCR 処理（重い処理）- OCRManager を使用
             # 排他制御：他ユーザーのOCR処理と並列実行しない
             async with self.ocr_lock:
+
                 async def processing_task():
                     # OCR マネージャーでテキストを抽出（フェイルオーバー対応）
-                    text_data = await OCRManager.extract_text_with_fallback(temp_image_path)
+                    text_data = await OCRManager.extract_text_with_fallback(
+                        temp_image_path
+                    )
                     if not text_data:
                         return "❌ 画像からテキストを読み取れませんでした。", None
                     all_records = parse_replay_text(text_data)
@@ -209,7 +212,9 @@ class ShadowverseCog(commands.Cog):
         is_dm = interaction.guild is None
         await interaction.response.defer(ephemeral=not is_dm)
         if not image:
-            await interaction.followup.send("画像ファイルを添付してください。", ephemeral=True)
+            await interaction.followup.send(
+                "画像ファイルを添付してください。", ephemeral=True
+            )
             return
         await self._execute_replay_processing(interaction, image)
 
@@ -224,20 +229,22 @@ class ShadowverseCog(commands.Cog):
             return
         is_dm = interaction.guild is None
         await interaction.response.defer(ephemeral=not is_dm)
-        
+
         total_images = len(message.attachments)
         for idx, attachment in enumerate(message.attachments, 1):
             await self._execute_replay_processing(interaction, attachment)
             # 1枚ずつ順次処理
-        
+
         # 複数画像の場合、全処理完了の合図を送信
         if total_images > 1:
             completion_embed = discord.Embed(
                 title="✅ 全処理完了",
                 description=f"全{total_images}枚の画像処理が完了しました。",
-                color=discord.Color.green()
+                color=discord.Color.green(),
             )
-            await self._send_result_embed_from_interaction(interaction, completion_embed)
+            await self._send_result_embed_from_interaction(
+                interaction, completion_embed
+            )
 
     @app_commands.command(name="stats", description="自分の戦績サマリーを表示します。")
     @app_commands.describe(period="集計期間", class_name="クラスを指定")
@@ -280,7 +287,9 @@ class ShadowverseCog(commands.Cog):
         )
 
     @commands.command(name="season_start", help="今期の開始日を設定または確認します。")
-    async def season_start_text(self, ctx: commands.Context, start_date: str | None = None):
+    async def season_start_text(
+        self, ctx: commands.Context, start_date: str | None = None
+    ):
         if ctx.guild is None:
             await ctx.send("このコマンドはサーバー内でのみ利用できます。")
             return

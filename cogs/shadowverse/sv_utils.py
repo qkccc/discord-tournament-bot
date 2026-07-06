@@ -11,6 +11,15 @@ from .sv_constants import DB_FILE, CLASS_NAMES, CLASS_EMOJI_MAP, RESULTS, TURN_O
 from .sv_db import get_records_as_df
 import sqlite3
 
+JST = datetime.timezone(datetime.timedelta(hours=9))
+
+
+def _to_jst_datetime(series: pd.Series) -> pd.Series:
+    parsed = pd.to_datetime(series, format="mixed")
+    if getattr(parsed.dt, "tz", None) is None:
+        return parsed.dt.tz_localize(JST)
+    return parsed.dt.tz_convert(JST)
+
 
 def extract_text_from_image(
     ocr_instance: DocumentAnalyzer, image_path: str
@@ -95,8 +104,8 @@ def get_stats_summary(
             color=discord.Color.orange(),
         )
 
-    user_df["match_time"] = pd.to_datetime(user_df["match_time"], format="mixed")
-    now = datetime.datetime.now()
+    user_df["match_time"] = _to_jst_datetime(user_df["match_time"])
+    now = datetime.datetime.now(JST)
     today_business_date = (now - datetime.timedelta(hours=5)).date()
 
     period_text_map = {"today": "今日の", "yesterday": "昨日の", "week": "一週間の"}
@@ -107,6 +116,27 @@ def get_stats_summary(
         if base_date.month == 1:
             return datetime.date(base_date.year - 1, 12, 26)
         return datetime.date(base_date.year, base_date.month - 1, 26)
+
+    def to_business_start(start_date: datetime.date) -> datetime.datetime:
+        return datetime.datetime.combine(start_date, datetime.time(5, 0, tzinfo=JST))
+
+    def to_business_range(
+        start_date: datetime.date, end_date: datetime.date
+    ) -> tuple[datetime.datetime, datetime.datetime]:
+        return (
+            to_business_start(start_date),
+            to_business_start(end_date),
+        )
+
+    def format_class_group_summary(df: pd.DataFrame, group_column: str) -> str:
+        grouped = df.groupby(group_column, sort=False)["result"].apply(
+            lambda x: (
+                f"{(x == 'WIN').sum() / len(x) * 100:.1f}% ({(x == 'WIN').sum()}勝 / {len(x)}戦)"
+            )
+        )
+        ordered_index = [name for name in CLASS_NAMES if name in grouped.index]
+        remaining_index = [name for name in grouped.index if name not in ordered_index]
+        return grouped.reindex(ordered_index + remaining_index).to_string()
 
     resolved_season_start_date: datetime.date | None = None
     if period == "season":
@@ -127,31 +157,28 @@ def get_stats_summary(
 
     if period != "all":
         if period == "today":
-            start_time = datetime.datetime.combine(
-                today_business_date, datetime.time(5, 0)
+            start_time, end_time = to_business_range(
+                today_business_date,
+                today_business_date + datetime.timedelta(days=1),
             )
-            end_time = start_time + datetime.timedelta(days=1)
             user_df = user_df[
                 (user_df["match_time"] >= start_time)
                 & (user_df["match_time"] < end_time)
             ]
         elif period == "yesterday":
             yesterday_business_date = today_business_date - datetime.timedelta(days=1)
-            start_time = datetime.datetime.combine(
-                yesterday_business_date, datetime.time(5, 0)
+            start_time, end_time = to_business_range(
+                yesterday_business_date, today_business_date
             )
-            end_time = start_time + datetime.timedelta(days=1)
             user_df = user_df[
                 (user_df["match_time"] >= start_time)
                 & (user_df["match_time"] < end_time)
             ]
         elif period == "week":
-            start_time = datetime.datetime.combine(
-                today_business_date - datetime.timedelta(days=6), datetime.time(5, 0)
+            start_time, end_time = to_business_range(
+                today_business_date - datetime.timedelta(days=6),
+                today_business_date + datetime.timedelta(days=1),
             )
-            end_time = datetime.datetime.combine(
-                today_business_date, datetime.time(5, 0)
-            ) + datetime.timedelta(days=1)
             user_df = user_df[
                 (user_df["match_time"] >= start_time)
                 & (user_df["match_time"] < end_time)
@@ -160,10 +187,10 @@ def get_stats_summary(
             start_base = resolved_season_start_date or resolve_default_season_start(
                 today_business_date
             )
-            start_time = datetime.datetime.combine(start_base, datetime.time(5, 0))
-            end_time = datetime.datetime.combine(
-                today_business_date, datetime.time(5, 0)
-            ) + datetime.timedelta(days=1)
+            start_time, end_time = to_business_range(
+                start_base,
+                today_business_date + datetime.timedelta(days=1),
+            )
             user_df = user_df[
                 (user_df["match_time"] >= start_time)
                 & (user_df["match_time"] < end_time)
@@ -220,15 +247,7 @@ def get_stats_summary(
             ]
 
         if class_name:
-            matchup_summary = (
-                user_df.groupby("opponent_class")["result"]
-                .apply(
-                    lambda x: (
-                        f"{(x == 'WIN').sum() / len(x) * 100:.1f}% ({(x == 'WIN').sum()}勝 / {len(x)}戦)"
-                    )
-                )
-                .to_string()
-            )
+            matchup_summary = format_class_group_summary(user_df, "opponent_class")
             my_class_info = CLASS_EMOJI_MAP.get(class_name)
             my_class_emoji = (
                 f"{discord.PartialEmoji(name=my_class_info[1], id=my_class_info[0])} "
@@ -257,15 +276,7 @@ def get_stats_summary(
                     inline=False,
                 )
         else:
-            class_summary = (
-                user_df.groupby("my_class")["result"]
-                .apply(
-                    lambda x: (
-                        f"{(x == 'WIN').sum() / len(x) * 100:.1f}% ({(x == 'WIN').sum()}勝 / {len(x)}戦)"
-                    )
-                )
-                .to_string()
-            )
+            class_summary = format_class_group_summary(user_df, "my_class")
             embed.add_field(
                 name="自分のクラス別勝率", value=f"```{class_summary}```", inline=False
             )
@@ -296,20 +307,12 @@ def get_stats_summary(
                     inline=False,
                 )
 
-            played_classes = sorted(user_df["my_class"].unique())
+            played_classes = [name for name in CLASS_NAMES if name in set(user_df["my_class"].unique())]
             for my_class in played_classes:
                 class_df = user_df[user_df["my_class"] == my_class]
                 if class_df.empty:
                     continue
-                matchup_summary = (
-                    class_df.groupby("opponent_class")["result"]
-                    .apply(
-                        lambda x: (
-                            f"{(x == 'WIN').sum() / len(x) * 100:.1f}% ({(x == 'WIN').sum()}勝 / {len(x)}戦)"
-                        )
-                    )
-                    .to_string()
-                )
+                matchup_summary = format_class_group_summary(class_df, "opponent_class")
                 my_class_info = CLASS_EMOJI_MAP.get(my_class)
                 my_class_emoji = (
                     f"{discord.PartialEmoji(name=my_class_info[1], id=my_class_info[0])} "
@@ -330,7 +333,6 @@ def get_recent_matches(user_id: int, count: int) -> tuple[Embed, list[dict]]:
     """
     conn = sqlite3.connect(DB_FILE)
     try:
-        # 修正: FROM matches -> FROM sv_matches
         recent_df = pd.read_sql_query(
             "SELECT * FROM sv_matches WHERE user_id = ? ORDER BY match_time DESC LIMIT ?",
             conn,
