@@ -307,7 +307,11 @@ def get_stats_summary(
                     inline=False,
                 )
 
-            played_classes = [name for name in CLASS_NAMES if name in set(user_df["my_class"].unique())]
+            played_classes = [
+                name
+                for name in CLASS_NAMES
+                if name in set(user_df["my_class"].unique())
+            ]
             for my_class in played_classes:
                 class_df = user_df[user_df["my_class"] == my_class]
                 if class_df.empty:
