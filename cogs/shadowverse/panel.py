@@ -202,13 +202,15 @@ class ChannelSelectView(ui.View):
         for ch in page_channels:
             # description に ID を入れて識別を容易にする
             options.append(
-                discord.SelectOption(label=ch.name, value=str(ch.id), description=f"ID: {ch.id}")
+                discord.SelectOption(
+                    label=ch.name, value=str(ch.id), description=f"ID: {ch.id}"
+                )
             )
 
         # 選択肢が空の場合は代替のメッセージ表示用のボタンのみを残す
         if options:
             self.select_menu = ui.Select(
-                placeholder=f"通知先にしたいチャンネルを選択してください... (ページ {self.page+1})",
+                placeholder=f"通知先にしたいチャンネルを選択してください... (ページ {self.page + 1})",
                 options=options,
             )
             self.select_menu.callback = self.on_select_submit
@@ -219,26 +221,48 @@ class ChannelSelectView(ui.View):
         next_disabled = end >= len(self.channels)
 
         self.add_item(
-            ui.Button(label="◀️ 前のページ", style=discord.ButtonStyle.secondary, disabled=prev_disabled, custom_id=f"sv_channel_prev:{self.page}")
+            ui.Button(
+                label="◀️ 前のページ",
+                style=discord.ButtonStyle.secondary,
+                disabled=prev_disabled,
+                custom_id=f"sv_channel_prev:{self.page}",
+            )
         )
         self.add_item(
-            ui.Button(label="次のページ ▶️", style=discord.ButtonStyle.secondary, disabled=next_disabled, custom_id=f"sv_channel_next:{self.page}")
+            ui.Button(
+                label="次のページ ▶️",
+                style=discord.ButtonStyle.secondary,
+                disabled=next_disabled,
+                custom_id=f"sv_channel_next:{self.page}",
+            )
         )
 
-    @ui.button(label="◀️ 前のページ", style=discord.ButtonStyle.secondary, custom_id="sv_channel_prev_button")
+    @ui.button(
+        label="◀️ 前のページ",
+        style=discord.ButtonStyle.secondary,
+        custom_id="sv_channel_prev_button",
+    )
     async def _prev_page(self, interaction: discord.Interaction, button: ui.Button):
         if interaction.user.id != self.author_id:
-            return await interaction.response.send_message("この操作はコマンドを実行した本人しか行えません。", ephemeral=True)
+            return await interaction.response.send_message(
+                "この操作はコマンドを実行した本人しか行えません。", ephemeral=True
+            )
         if self.page <= 0:
             return await interaction.response.defer()
         self.page -= 1
         self._build_view()
         await interaction.response.edit_message(content=None, view=self)
 
-    @ui.button(label="次のページ ▶️", style=discord.ButtonStyle.secondary, custom_id="sv_channel_next_button")
+    @ui.button(
+        label="次のページ ▶️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="sv_channel_next_button",
+    )
     async def _next_page(self, interaction: discord.Interaction, button: ui.Button):
         if interaction.user.id != self.author_id:
-            return await interaction.response.send_message("この操作はコマンドを実行した本人しか行えません。", ephemeral=True)
+            return await interaction.response.send_message(
+                "この操作はコマンドを実行した本人しか行えません。", ephemeral=True
+            )
         if (self.page + 1) * self.per_page >= len(self.channels):
             return await interaction.response.defer()
         self.page += 1

@@ -30,7 +30,7 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         "C:/Windows/Fonts/meiryob.ttc",
         "assets/meiryo.ttc",
         "C:/Windows/Fonts/meiryo.ttc",
-        "C:/Windows/Fonts/msgothic.ttc"
+        "C:/Windows/Fonts/msgothic.ttc",
     ]
     for p in paths:
         try:
@@ -99,7 +99,12 @@ def _draw_class_icon(
         try:
             with Image.open(img_path) as ic:
                 ic = ic.convert("RGBA")
-                ic = ic.resize((size, size), Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS)
+                ic = ic.resize(
+                    (size, size),
+                    Image.Resampling.LANCZOS
+                    if hasattr(Image, "Resampling")
+                    else Image.LANCZOS,
+                )
                 img_box = (int(x), int(y))
                 if base_image is not None:
                     base_image.paste(ic, img_box, ic)
@@ -327,6 +332,8 @@ def _truncate_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -
     while text and _text_size(draw, text + ellipsis, font)[0] > max_width:
         text = text[:-1]
     return text + ellipsis if text else ellipsis
+
+
 def _draw_table_panel(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
@@ -349,7 +356,7 @@ def _draw_table_panel(
     left, top, right, bottom = box
     draw.rounded_rectangle(box, radius=12, fill=background)
     draw.rounded_rectangle(box, radius=12, outline=accent, width=2)
-    
+
     # タイトルが指定されている場合のみ描画
     if title:
         draw.text((left + 18, top + 12), title, font=title_font, fill=(245, 247, 250))
@@ -357,19 +364,29 @@ def _draw_table_panel(
         grid_top = top + 52
     else:
         # 表題非表示時は、テーブル総高さに基づき上下中央寄せ計算を行う
-        total_grid_height = header_height + body_top_padding + (row_height * len(rows)) + 4 * (len(rows) - 1)
+        total_grid_height = (
+            header_height
+            + body_top_padding
+            + (row_height * len(rows))
+            + 4 * (len(rows) - 1)
+        )
         panel_height = bottom - top
         grid_top = top + max(12, (panel_height - total_grid_height) // 2)
 
     # グリッドの幅と、中央寄せのための開始X座標を枠内で計算する
     total_width = sum(col_widths)
-    panel_width = right - left - 28 # 左右のパディング 14px ずつを引いた利用可能幅
+    panel_width = right - left - 28  # 左右のパディング 14px ずつを引いた利用可能幅
     x = left + 14 + (panel_width - total_width) // 2
     y = grid_top
 
     class_initials = {
-        "エルフ": "E", "ロイヤル": "R", "ウィッチ": "W", "ドラゴン": "D", 
-        "ナイトメア": "Ni", "ビショップ": "B", "ネメシス": "Nm"
+        "エルフ": "E",
+        "ロイヤル": "R",
+        "ウィッチ": "W",
+        "ドラゴン": "D",
+        "ナイトメア": "Ni",
+        "ビショップ": "B",
+        "ネメシス": "Nm",
     }
     initial_to_class = {v: k for k, v in class_initials.items()}
 
@@ -382,38 +399,49 @@ def _draw_table_panel(
     cur_x = x
     for col_idx, (header, width) in enumerate(zip(headers, col_widths)):
         left_pad = 6
-        
+
         target_class = None
         if header in CLASS_NAMES:
             target_class = header
         elif header in initial_to_class:
             target_class = initial_to_class[header]
-            
+
         icon_size = 30
         icon_spacing = 36
-        header_text = _truncate_text(draw, header, header_font, width - (icon_spacing if target_class else 0) - 12)
+        header_text = _truncate_text(
+            draw,
+            header,
+            header_font,
+            width - (icon_spacing if target_class else 0) - 12,
+        )
         w_h = _text_size(draw, header_text, header_font)[0]
         header_h = _text_size(draw, header_text, header_font)[1]
-        
+
         # 勝率列の分離に伴い、マトリクス（対戦相手クラス）列のインデックスは col_idx >= 3 になる
         if col_idx >= 3:
             # マトリクス列は中央寄せ
             content_w = w_h + (icon_spacing if target_class else 0)
             start_x = cur_x + (width - content_w) / 2
-            
+
             if target_class:
                 icon_x = start_x
                 icon_y = y + (header_height - icon_size) // 2
                 try:
                     _draw_class_icon(
-                        draw, icon_x, icon_y, icon_size, target_class, header_font, base_image=base_image
+                        draw,
+                        icon_x,
+                        icon_y,
+                        icon_size,
+                        target_class,
+                        header_font,
+                        base_image=base_image,
                     )
                 except Exception:
                     pass
                 start_x += icon_spacing
-            
+
             draw.text(
-                (start_x, y + (header_height - header_h) / 2 - 4.5), # 縦中央微調整
+                (start_x, y + (header_height - header_h) / 2 - 4.5),  # 縦中央微調整
                 header_text,
                 font=header_font,
                 fill=(190, 198, 210),
@@ -425,14 +453,23 @@ def _draw_table_panel(
                 icon_y = y + (header_height - icon_size) // 2
                 try:
                     _draw_class_icon(
-                        draw, icon_x, icon_y, icon_size, target_class, header_font, base_image=base_image
+                        draw,
+                        icon_x,
+                        icon_y,
+                        icon_size,
+                        target_class,
+                        header_font,
+                        base_image=base_image,
                     )
                 except Exception:
                     pass
                 left_pad += icon_spacing
-                
+
             draw.text(
-                (cur_x + left_pad, y + (header_height - header_h) / 2 - 4.5), # 縦中央微調整
+                (
+                    cur_x + left_pad,
+                    y + (header_height - header_h) / 2 - 4.5,
+                ),  # 縦中央微調整
                 header_text,
                 font=header_font,
                 fill=(190, 198, 210),
@@ -456,14 +493,20 @@ def _draw_table_panel(
                 icon_y = y + (row_height - icon_size) // 2
                 try:
                     _draw_class_icon(
-                        draw, icon_x, icon_y, icon_size, cell, cell_font, base_image=base_image
+                        draw,
+                        icon_x,
+                        icon_y,
+                        icon_size,
+                        cell,
+                        cell_font,
+                        base_image=base_image,
                     )
                 except Exception:
                     pass
                 icon_offset = icon_spacing
 
             text_x = cur_x + 6 + icon_offset
-            
+
             # LEDシグナルの描画 (勝率列 col_idx == 2 に対する混同防止色付け)
             sig_color = None
             cell_str = str(cell)
@@ -471,11 +514,11 @@ def _draw_table_panel(
                 try:
                     rate_val = float(cell_str.replace("%", "").strip())
                     if rate_val > 50.0:
-                        sig_color = (52, 152, 219) # 明るいブルー (青と緑を逆転)
+                        sig_color = (52, 152, 219)  # 明るいブルー (青と緑を逆転)
                     elif rate_val < 50.0:
-                        sig_color = (231, 76, 60) # 明るいレッド
+                        sig_color = (231, 76, 60)  # 明るいレッド
                     else:
-                        sig_color = (46, 204, 113) # 明るいグリーン
+                        sig_color = (46, 204, 113)  # 明るいグリーン
                 except Exception:
                     pass
 
@@ -483,9 +526,11 @@ def _draw_table_panel(
                 sig_size = 12
                 sig_x = text_x
                 sig_y = y + (row_height - sig_size) // 2 - 4.5
-                draw.ellipse((sig_x, sig_y, sig_x + sig_size, sig_y + sig_size), fill=sig_color)
+                draw.ellipse(
+                    (sig_x, sig_y, sig_x + sig_size, sig_y + sig_size), fill=sig_color
+                )
                 text_x += 20
-            
+
             cell_fill = None
             text_color = (236, 239, 244)
 
@@ -498,16 +543,16 @@ def _draw_table_panel(
                     w_l = lines[0].split("-")
                     total_games = int(w_l[0]) + int(w_l[1])
                     rate_val = float(lines[1].replace("%", "").strip())
-                    
+
                     if total_games > 0:
                         if rate_val > 50.0:
-                            cell_fill = (25, 45, 78) # ダークブルー (青と緑を逆転)
+                            cell_fill = (25, 45, 78)  # ダークブルー (青と緑を逆転)
                             text_color = (190, 215, 255)
                         elif rate_val < 50.0:
-                            cell_fill = (78, 25, 25) # ダークレッド
+                            cell_fill = (78, 25, 25)  # ダークレッド
                             text_color = (255, 180, 180)
                         else:
-                            cell_fill = (22, 64, 40) # ダークグリーン
+                            cell_fill = (22, 64, 40)  # ダークグリーン
                             text_color = (175, 238, 186)
                 except Exception:
                     pass
@@ -516,13 +561,13 @@ def _draw_table_panel(
                 draw.rounded_rectangle(
                     (cur_x + 2, y + 2, cur_x + width - 2, y + row_height - 2),
                     radius=4,
-                    fill=cell_fill
+                    fill=cell_fill,
                 )
 
             cell_text = _truncate_text(
                 draw, cell_str, cell_font, width - (text_x - cur_x) - 6
             )
-            
+
             # セル内のテキストを描画
             lines = cell_text.split("\n")
             if len(lines) > 1:
@@ -531,34 +576,39 @@ def _draw_table_panel(
                 h2 = _text_size(draw, lines[1], cell_font)[1]
                 line_gap = 4
                 total_h = h1 + h2 + line_gap
-                start_y = y + (row_height - total_h) / 2 - 4.0 # 縦中央微調整
-                
+                start_y = y + (row_height - total_h) / 2 - 4.0  # 縦中央微調整
+
                 # 1行目
                 w1 = _text_size(draw, lines[0], cell_font)[0]
-                if col_idx >= 3: # 勝率列の分離に伴い、col_idx >= 3 に判定更新
+                if col_idx >= 3:  # 勝率列の分離に伴い、col_idx >= 3 に判定更新
                     tx1 = cur_x + (width - w1) / 2
                 else:
                     tx1 = text_x
                 draw.text((tx1, start_y), lines[0], font=cell_font, fill=text_color)
-                
+
                 # 2行目
                 w2 = _text_size(draw, lines[1], cell_font)[0]
-                if col_idx >= 3: # 勝率列の分離に伴い、col_idx >= 3 に判定更新
+                if col_idx >= 3:  # 勝率列の分離に伴い、col_idx >= 3 に判定更新
                     tx2 = cur_x + (width - w2) / 2
                 else:
                     tx2 = text_x
-                draw.text((tx2, start_y + h1 + line_gap), lines[1], font=cell_font, fill=text_color)
+                draw.text(
+                    (tx2, start_y + h1 + line_gap),
+                    lines[1],
+                    font=cell_font,
+                    fill=text_color,
+                )
             else:
                 # 1行のみの場合
                 cell_bbox = _text_bbox(draw, cell_text, cell_font)
                 cell_h = cell_bbox[3] - cell_bbox[1]
                 draw.text(
-                    (text_x, y + (row_height - cell_h) / 2 - 4.5), # 縦中央微調整
+                    (text_x, y + (row_height - cell_h) / 2 - 4.5),  # 縦中央微調整
                     cell_text,
                     font=cell_font,
                     fill=text_color,
                 )
-                
+
             cur_x += width
         y += row_height + 4
 
@@ -570,7 +620,9 @@ def _format_rate_record(wins: int, total: int) -> str:
     return f"{rate:.1f}% ({wins}勝/{total}戦)"
 
 
-def _create_gradient_bg_fast(width: int, height: int, color1: tuple[int, int, int], color2: tuple[int, int, int]) -> Image.Image:
+def _create_gradient_bg_fast(
+    width: int, height: int, color1: tuple[int, int, int], color2: tuple[int, int, int]
+) -> Image.Image:
     base = Image.new("RGB", (1, height))
     for y in range(height):
         ratio = y / height
@@ -581,7 +633,14 @@ def _create_gradient_bg_fast(width: int, height: int, color1: tuple[int, int, in
     return base.resize((width, height))
 
 
-def _draw_donut_chart(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], rate: float, fill_color: tuple[int, int, int], bg_color: tuple[int, int, int], panel_bg_color: tuple[int, int, int]):
+def _draw_donut_chart(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    rate: float,
+    fill_color: tuple[int, int, int],
+    bg_color: tuple[int, int, int],
+    panel_bg_color: tuple[int, int, int],
+):
     # 1. 全体のドーナツ（グレー背景）
     draw.pieslice(box, start=0, end=360, fill=bg_color)
     # 2. 勝率分のドーナツ（時計の12時位置 = -90度 から開始）
@@ -594,9 +653,13 @@ def _draw_donut_chart(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int],
     center_x = box[0] + w / 2
     center_y = box[1] + w / 2
     draw.ellipse(
-        (center_x - inner_radius, center_y - inner_radius,
-         center_x + inner_radius, center_y + inner_radius),
-        fill=panel_bg_color
+        (
+            center_x - inner_radius,
+            center_y - inner_radius,
+            center_x + inner_radius,
+            center_y + inner_radius,
+        ),
+        fill=panel_bg_color,
     )
 
 
@@ -625,7 +688,7 @@ def generate_stats_summary_image(
     bg_color2 = (12, 15, 22)
     panel_bg = (24, 29, 41)
     panel_bg_alt = (30, 36, 50)
-    accent = (65, 105, 225) # ロイヤルブルー
+    accent = (65, 105, 225)  # ロイヤルブルー
     green = (46, 125, 50)  # マテリアルグリーン
 
     # ユーザーフィードバック（2倍近い文字サイズ）を受けてフォントサイズを極限まで拡大
@@ -637,7 +700,7 @@ def generate_stats_summary_image(
     row_font = _load_font(24)
     small_font = _load_font(20)
     micro_font = _load_font(16)
-    
+
     # 総合サマリー用の大きな太字フォント
     top_info_font = _load_font(32)
 
@@ -654,12 +717,17 @@ def generate_stats_summary_image(
     top_box = (30, 80, canvas_w - 30, top_box_bottom)
     draw.rounded_rectangle(top_box, radius=12, fill=panel_bg)
     draw.rounded_rectangle(top_box, radius=12, outline=accent, width=2)
-    
+
     # 総合サマリー内のブロック (横長スリム化、Y座標調整)
     donut_size = 80
-    donut_box = (60, 80 + (115 - donut_size) // 2, 60 + donut_size, 80 + (115 - donut_size) // 2 + donut_size)
+    donut_box = (
+        60,
+        80 + (115 - donut_size) // 2,
+        60 + donut_size,
+        80 + (115 - donut_size) // 2 + donut_size,
+    )
     _draw_donut_chart(draw, donut_box, win_rate, green, (45, 54, 71), panel_bg)
-    
+
     # ドーナツ中央に勝率をテキストで中央寄せ (フォントサイズをサイズ26に拡大)
     rate_text = f"{win_rate:.1f}%" if win_rate > 0 or total_matches > 0 else "-"
     tw, th = _text_size(draw, rate_text, panel_title_font)
@@ -669,18 +737,23 @@ def generate_stats_summary_image(
 
     # 右側のテキスト情報 (横並びで配置してスリム化、Y座標調整、フォントサイズをサイズ32に拡大)
     tx_info = 170
-    ty_info = 80 + (115 - 40) // 2 # 縦中央寄せ
+    ty_info = 80 + (115 - 40) // 2  # 縦中央寄せ
     draw.text((tx_info, ty_info), "総合戦績", font=top_info_font, fill=green)
-    
+
     stats_text = f"{win_count}勝 {loss_count}敗 / {total_matches}戦"
-    draw.text((tx_info + 180, ty_info + 1), stats_text, font=top_info_font, fill=(245, 247, 250))
+    draw.text(
+        (tx_info + 180, ty_info + 1),
+        stats_text,
+        font=top_info_font,
+        fill=(245, 247, 250),
+    )
 
     # Main panel (クラス別 ＆ 対クラス成績マトリクス表、開始位置をスライド)
     panel_top = top_box_bottom + 15
-    
+
     # 表示する自分のクラスの決定
     target_my_classes = [class_name] if class_name else CLASS_NAMES
-    
+
     # 英語省略表記マッピング
     class_initials = {
         "エルフ": "E",
@@ -689,13 +762,15 @@ def generate_stats_summary_image(
         "ドラゴン": "D",
         "ナイトメア": "Ni",
         "ビショップ": "B",
-        "ネメシス": "Nm"
+        "ネメシス": "Nm",
     }
-    
+
     # ヘッダー (勝率を新規の独立した列に分離し、対戦相手クラス名は英語省略表記 [E, R, W, D, Ni, B, Nm] に統一)
-    combined_headers = ["クラス", "勝敗", "勝率"] + [class_initials.get(cn, cn[0]) for cn in CLASS_NAMES]
+    combined_headers = ["クラス", "勝敗", "勝率"] + [
+        class_initials.get(cn, cn[0]) for cn in CLASS_NAMES
+    ]
     combined_rows = []
-    
+
     for my_class in target_my_classes:
         class_df = user_df[user_df["my_class"] == my_class]
         total = len(class_df)
@@ -723,12 +798,12 @@ def generate_stats_summary_image(
     # 青線枠（パネル）は画面横幅いっぱい (左右余白30px) の 1860px に広げて揃える
     combined_panel = (30, panel_top, canvas_w - 30, canvas_h - 40)
     col_widths = [220, 260, 160] + [160] * len(CLASS_NAMES)
-    
+
     # _draw_table_panel 側で自動的に枠内垂直・水平中央寄せが行われます
     _draw_table_panel(
         draw,
         combined_panel,
-        "", # 表題「クラス別 & 対クラス成績」は非表示にして上部を詰める
+        "",  # 表題「クラス別 & 対クラス成績」は非表示にして上部を詰める
         accent,
         panel_bg,
         panel_title_font,
@@ -737,7 +812,7 @@ def generate_stats_summary_image(
         combined_headers,
         combined_rows,
         col_widths,
-        row_height=80, # 行の高さ 80px は維持
+        row_height=80,  # 行の高さ 80px は維持
         base_image=img,
     )
 
