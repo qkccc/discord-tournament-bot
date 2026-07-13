@@ -19,6 +19,7 @@ from .sv_utils import (
     extract_text_from_image,
     parse_replay_text,
     get_stats_summary,
+    generate_stats_summary_image,
     get_recent_matches,
 )
 from .ocr_manager import OCRManager
@@ -67,8 +68,10 @@ class ShadowverseCog(commands.Cog):
     async def _send_result_embed_from_interaction(
         self,
         interaction: discord.Interaction,
-        embed: discord.Embed,
+        embed: discord.Embed | None,
         force_public: bool = False,
+        file: discord.File | None = None,
+        content: str | None = None,
     ):
         """
         インタラクションに応じてEmbedを送信するヘルパー関数。
@@ -80,7 +83,14 @@ class ShadowverseCog(commands.Cog):
 
         if force_public and interaction.guild is not None and target_channel:
             try:
-                await target_channel.send(embed=embed)
+                send_kwargs = {}
+                if content is not None:
+                    send_kwargs["content"] = content
+                if embed is not None:
+                    send_kwargs["embed"] = embed
+                if file is not None:
+                    send_kwargs["file"] = file
+                await target_channel.send(**send_kwargs)
                 await interaction.followup.send(
                     f"✅ 結果を {target_channel.mention} に送信しました。",
                     ephemeral=True,
@@ -90,9 +100,23 @@ class ShadowverseCog(commands.Cog):
                     f"❌ 設定されたチャンネル {target_channel.mention} にメッセージを送信する権限がありません。代わりにここに表示します。",
                     ephemeral=True,
                 )
-                await interaction.followup.send(embed=embed, ephemeral=True)
+                send_kwargs = {}
+                if content is not None:
+                    send_kwargs["content"] = content
+                if embed is not None:
+                    send_kwargs["embed"] = embed
+                if file is not None:
+                    send_kwargs["file"] = file
+                await interaction.followup.send(ephemeral=True, **send_kwargs)
         else:
-            await interaction.followup.send(embed=embed)
+            send_kwargs = {}
+            if content is not None:
+                send_kwargs["content"] = content
+            if embed is not None:
+                send_kwargs["embed"] = embed
+            if file is not None:
+                send_kwargs["file"] = file
+            await interaction.followup.send(**send_kwargs)
 
     # --- 共通ロジック: 画像処理と登録 ---
     async def _execute_replay_processing(
@@ -274,7 +298,23 @@ class ShadowverseCog(commands.Cog):
             if interaction.guild_id
             else None
         )
-        # 集計処理（Pandas使用）は同期的なので to_thread のまま
+        stats_file = await asyncio.to_thread(
+            generate_stats_summary_image,
+            interaction.user.id,
+            selected_period,
+            selected_class,
+            season_start_date,
+        )
+        if stats_file is not None:
+            await self._send_result_embed_from_interaction(
+                interaction,
+                None,
+                force_public=True,
+                file=stats_file,
+            )
+            return
+
+        # フォールバック: 画像生成に失敗した場合は従来のEmbed表示
         embed = await asyncio.to_thread(
             get_stats_summary,
             interaction.user.id,

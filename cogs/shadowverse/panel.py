@@ -123,7 +123,11 @@ try:
                         f"[ConfirmDeleteView] followup send failed: {follow_e}"
                     )
 
-    from .sv_utils import get_stats_summary, get_recent_matches
+    from .sv_utils import (
+        generate_stats_summary_image,
+        get_stats_summary,
+        get_recent_matches,
+    )
     from .sv_db import get_guild_season_start_date
 except ImportError:
 
@@ -272,20 +276,36 @@ class StatsPeriodSelectView(ui.View):
             if interaction.guild_id
             else None
         )
-        embed = await asyncio.to_thread(
-            get_stats_summary,
+        stats_file = await asyncio.to_thread(
+            generate_stats_summary_image,
             interaction.user.id,
             selected_period,
             None,
             season_start_date,
         )
+        if stats_file is None:
+            embed = await asyncio.to_thread(
+                get_stats_summary,
+                interaction.user.id,
+                selected_period,
+                None,
+                season_start_date,
+            )
+        else:
+            embed = None
+
         target_channel_id = await self.db_manager.get_user_channel(interaction.user.id)
         target_channel = (
             self.bot.get_channel(target_channel_id) if target_channel_id else None
         )
         if target_channel:
             try:
-                await target_channel.send(embed=embed)
+                send_kwargs = {}
+                if embed is not None:
+                    send_kwargs["embed"] = embed
+                if stats_file is not None:
+                    send_kwargs["file"] = stats_file
+                await target_channel.send(**send_kwargs)
                 await interaction.followup.send(
                     f"✅ 結果を {target_channel.mention} に送信しました。",
                     ephemeral=True,
@@ -296,7 +316,12 @@ class StatsPeriodSelectView(ui.View):
                     ephemeral=True,
                 )
         else:
-            await interaction.followup.send(embed=embed)
+            send_kwargs = {}
+            if embed is not None:
+                send_kwargs["embed"] = embed
+            if stats_file is not None:
+                send_kwargs["file"] = stats_file
+            await interaction.followup.send(**send_kwargs)
 
 
 class HistoryCountModal(ui.Modal, title="履歴の表示件数"):

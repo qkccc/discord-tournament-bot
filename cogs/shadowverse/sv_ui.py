@@ -22,7 +22,7 @@ from .sv_db import (
     get_user_channel_setting,
     get_guild_season_start_date,
 )
-from .sv_utils import get_stats_summary, get_recent_matches
+from .sv_utils import generate_stats_summary_image, get_stats_summary, get_recent_matches
 
 if typing.TYPE_CHECKING:
     from .main import ShadowverseCog
@@ -489,17 +489,32 @@ class StatsOptionsView(ui.View):
             if interaction.guild_id
             else None
         )
-        # 統計計算はPandas使用のため to_thread のまま
-        embed = await asyncio.to_thread(
-            get_stats_summary,
+        stats_file = await asyncio.to_thread(
+            generate_stats_summary_image,
             interaction.user.id,
             self.period,
             self.class_name,
             season_start_date,
         )
-        await self.cog._send_result_embed_from_interaction(
-            interaction, embed, force_public=True
-        )
+        if stats_file is not None:
+            await self.cog._send_result_embed_from_interaction(
+                interaction,
+                None,
+                force_public=True,
+                file=stats_file,
+            )
+        else:
+            # 画像生成に失敗した場合は従来のEmbed表示へフォールバック
+            embed = await asyncio.to_thread(
+                get_stats_summary,
+                interaction.user.id,
+                self.period,
+                self.class_name,
+                season_start_date,
+            )
+            await self.cog._send_result_embed_from_interaction(
+                interaction, embed, force_public=True
+            )
         await self.original_interaction.edit_original_response(
             content="結果を表示しました。", view=None
         )
