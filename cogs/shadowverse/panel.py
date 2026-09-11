@@ -220,29 +220,25 @@ class ChannelSelectView(ui.View):
         prev_disabled = self.page <= 0
         next_disabled = end >= len(self.channels)
 
-        self.add_item(
-            ui.Button(
-                label="◀️ 前のページ",
-                style=discord.ButtonStyle.secondary,
-                disabled=prev_disabled,
-                custom_id=f"sv_channel_prev:{self.page}",
-            )
+        prev_button = ui.Button(
+            label="◀️ 前のページ",
+            style=discord.ButtonStyle.secondary,
+            disabled=prev_disabled,
+            custom_id=f"sv_channel_prev:{self.page}",
         )
-        self.add_item(
-            ui.Button(
-                label="次のページ ▶️",
-                style=discord.ButtonStyle.secondary,
-                disabled=next_disabled,
-                custom_id=f"sv_channel_next:{self.page}",
-            )
-        )
+        prev_button.callback = self._prev_page
+        self.add_item(prev_button)
 
-    @ui.button(
-        label="◀️ 前のページ",
-        style=discord.ButtonStyle.secondary,
-        custom_id="sv_channel_prev_button",
-    )
-    async def _prev_page(self, interaction: discord.Interaction, button: ui.Button):
+        next_button = ui.Button(
+            label="次のページ ▶️",
+            style=discord.ButtonStyle.secondary,
+            disabled=next_disabled,
+            custom_id=f"sv_channel_next:{self.page}",
+        )
+        next_button.callback = self._next_page
+        self.add_item(next_button)
+
+    async def _prev_page(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message(
                 "この操作はコマンドを実行した本人しか行えません。", ephemeral=True
@@ -253,12 +249,7 @@ class ChannelSelectView(ui.View):
         self._build_view()
         await interaction.response.edit_message(content=None, view=self)
 
-    @ui.button(
-        label="次のページ ▶️",
-        style=discord.ButtonStyle.secondary,
-        custom_id="sv_channel_next_button",
-    )
-    async def _next_page(self, interaction: discord.Interaction, button: ui.Button):
+    async def _next_page(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message(
                 "この操作はコマンドを実行した本人しか行えません。", ephemeral=True

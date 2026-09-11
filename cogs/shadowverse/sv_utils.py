@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .sv_constants import DB_FILE, CLASS_NAMES, CLASS_EMOJI_MAP, RESULTS, TURN_ORDERS
 from .sv_db import get_records_as_df
+from .sv_stats_agg import resolve_default_season_start
 import sqlite3
 import os
 
@@ -162,13 +163,6 @@ def _build_stats_context(
     today_business_date = (now - datetime.timedelta(hours=5)).date()
 
     period_text_map = {"today": "今日の", "yesterday": "昨日の", "week": "一週間の"}
-
-    def resolve_default_season_start(base_date: datetime.date) -> datetime.date:
-        if base_date.day >= 26:
-            return base_date.replace(day=26)
-        if base_date.month == 1:
-            return datetime.date(base_date.year - 1, 12, 26)
-        return datetime.date(base_date.year, base_date.month - 1, 26)
 
     resolved_season_start_date: datetime.date | None = None
     if period == "season":
