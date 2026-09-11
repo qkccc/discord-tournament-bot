@@ -8,6 +8,9 @@ from cogs.utils.db_handler import db
 
 load_dotenv()
 
+# ステータス種別: vc=VC参加, excused=欠席理由が承認済み, absent=どちらもなし（通知対象）
+STATUS_LABELS = {"vc": "🎤 VC参加", "excused": "📝 欠席理由承認", "absent": "❌ 未対応"}
+
 class VoiceLoggerCog(commands.Cog):
     JST = datetime.timezone(datetime.timedelta(hours=9))
     MENTION_TIME_UTC = datetime.time(hour=13, minute=5, tzinfo=datetime.timezone.utc)
@@ -60,6 +63,16 @@ class VoiceLoggerCog(commands.Cog):
             CREATE TABLE IF NOT EXISTS voice_guild_settings (
                 guild_id INTEGER PRIMARY KEY,
                 call_notification_channel_id INTEGER
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS attendance_weekly (
+                guild_id INTEGER NOT NULL,
+                week_start TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, week_start, user_id)
             )
         """)
 
@@ -215,6 +228,7 @@ class VoiceLoggerCog(commands.Cog):
         return not sub_account_ids.isdisjoint(users_in_vc)
 
     async def get_reacted_users_from_attendance(self, guild: discord.Guild, since_utc: datetime.datetime) -> set | None:
+        """出欠チャンネルで、欠席理由の投稿に承認リアクションが付いた投稿者を「対応済み」として集める。"""
         attendance_channel = guild.get_channel(self.ATTENDANCE_CHANNEL_ID)
         if not attendance_channel: return None
         reacted_user_ids = set()
@@ -224,20 +238,28 @@ class VoiceLoggerCog(commands.Cog):
             return reacted_user_ids
         except discord.Forbidden: return None
 
-    async def _get_mention_targets(self, guild: discord.Guild) -> list[discord.Member]:
+    async def _compute_weekly_attendance(
+        self, guild: discord.Guild
+    ) -> tuple[list[discord.Member], dict[int, str], datetime.date] | None:
+        """対象ロールメンバーの今週の出欠を判定する。
+
+        戻り値: (未対応メンバー一覧, {user_id: ステータス}, 集計週の開始日(JST, 日曜始まり))
+        ステータスは "vc"（VC参加）/ "excused"（欠席理由が承認済み）/ "absent"（どちらもなし）。
+        """
         target_role = discord.utils.get(guild.roles, name=self.TARGET_ROLE_NAME)
         if not target_role:
-            return []
+            return None
         now_jst = datetime.datetime.now(self.JST)
         days_since_sunday = (now_jst.weekday() + 1) % 7
-        last_sunday_date = now_jst.date() - datetime.timedelta(days=days_since_sunday)
-        since_utc = datetime.datetime.combine(last_sunday_date, datetime.time(5, 0), tzinfo=self.JST).astimezone(datetime.timezone.utc)
+        week_start_date = now_jst.date() - datetime.timedelta(days=days_since_sunday)
+        since_utc = datetime.datetime.combine(week_start_date, datetime.time(5, 0), tzinfo=self.JST).astimezone(datetime.timezone.utc)
         users_in_vc = {member.id for channel in guild.voice_channels for member in channel.members}
         reacted_user_ids = await self.get_reacted_users_from_attendance(guild, since_utc)
         if reacted_user_ids is None:
-            return []
+            return None
 
         members_to_mention = []
+        attendance: dict[int, str] = {}
         for member in target_role.members:
             if member.bot:
                 continue
@@ -246,35 +268,64 @@ class VoiceLoggerCog(commands.Cog):
             rows = await db.fetchall("SELECT sub_user_id FROM user_sub_accounts WHERE main_user_id = ?", (member.id,))
             sub_account_ids = {row['sub_user_id'] for row in rows}
 
-            # 本人またはサブ垢がVCにいる場合は除外
+            # 本人またはサブ垢がVCにいればVC参加、いなくても欠席理由が承認済みなら excused
             if member.id in users_in_vc or not sub_account_ids.isdisjoint(users_in_vc):
-                continue
+                status = "vc"
+            elif member.id in reacted_user_ids or not sub_account_ids.isdisjoint(reacted_user_ids):
+                status = "excused"
+            else:
+                status = "absent"
 
-            # 本人またはサブ垢がリアクションしている場合は除外
-            if member.id in reacted_user_ids or not sub_account_ids.isdisjoint(reacted_user_ids):
-                continue
+            attendance[member.id] = status
+            if status == "absent":
+                members_to_mention.append(member)
 
-            members_to_mention.append(member)
+        return members_to_mention, attendance, week_start_date
+
+    async def _get_mention_targets(self, guild: discord.Guild) -> list[discord.Member]:
+        result = await self._compute_weekly_attendance(guild)
+        if result is None:
+            return []
+        members_to_mention, _, _ = result
         return members_to_mention
+
+    async def _save_weekly_attendance(
+        self, guild_id: int, week_start_date: datetime.date, attendance: dict[int, str]
+    ):
+        if not attendance:
+            return
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        rows = [
+            (guild_id, week_start_date.isoformat(), user_id, status, now_iso)
+            for user_id, status in attendance.items()
+        ]
+        await db.executemany(
+            "INSERT OR REPLACE INTO attendance_weekly "
+            "(guild_id, week_start, user_id, status, recorded_at) VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
 
     @tasks.loop(time=MENTION_TIME_UTC)
     async def weekly_mention_task(self):
-        if self.skip_weekly_mention:
-            alert_channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
-            if alert_channel: await alert_channel.send("今週の定例通知はスキップされました。")
-            self.skip_weekly_mention = False
-            return
-
+        # 曜日判定を先に行う。スキップ判定をこれより前に置くと、土曜日以外の
+        # 実行（このループは毎日13:05 UTCに走る）でフラグが先に消費されてしまい、
+        # 肝心の土曜日にスキップが反映されないバグがあったため順序を修正。
         if datetime.datetime.now(datetime.timezone.utc).weekday() != 5: return
         alert_channel = self.bot.get_channel(self.ALERT_CHANNEL_ID)
         if not alert_channel: return
-        members = await self._get_mention_targets(alert_channel.guild)
-        # 修正後
+
+        if self.skip_weekly_mention:
+            await alert_channel.send("今週の定例通知はスキップされました。")
+            self.skip_weekly_mention = False
+            return
+
+        result = await self._compute_weekly_attendance(alert_channel.guild)
+        if result is None: return
+        members, attendance, week_start_date = result
+        await self._save_weekly_attendance(alert_channel.guild.id, week_start_date, attendance)
+
         if members:
-            # リスト内包表記を外に出して文字列を作る
             mentions_str = " ".join([m.mention for m in members])
-            
-            # 作った変数を f-string に埋め込むだけにする
             await alert_channel.send(f"{mentions_str}\n\n**定例の時間です！**\nボイスチャンネルに集合してください。")
 
     @weekly_mention_task.before_loop
@@ -335,6 +386,83 @@ class VoiceLoggerCog(commands.Cog):
         if not rows: return await ctx.send("登録なし")
         lines = [f"{r['main_user_id']} → {r['sub_user_id']}" for r in rows]
         await ctx.send(embed=discord.Embed(title="サブアカウント一覧", description="\n".join(lines), color=0x3498DB))
+
+    @commands.command(name='出欠履歴')
+    @commands.has_permissions(administrator=True)
+    async def show_attendance_history(self, ctx, member: discord.Member = None, weeks: int = 8):
+        member = member or ctx.author
+        weeks = max(1, min(weeks, 52))
+        rows = await db.fetchall(
+            "SELECT week_start, status FROM attendance_weekly "
+            "WHERE guild_id = ? AND user_id = ? ORDER BY week_start DESC LIMIT ?",
+            (ctx.guild.id, member.id, weeks),
+        )
+        if not rows:
+            return await ctx.send(embed=discord.Embed(
+                title="出欠履歴", description=f"{member.display_name} の記録はまだありません。", color=0x95A5A6
+            ))
+        lines = [f"`{r['week_start']}` {STATUS_LABELS.get(r['status'], r['status'])}" for r in rows]
+        handled_count = sum(1 for r in rows if r['status'] != 'absent')
+        embed = discord.Embed(
+            title=f"{member.display_name} の出欠履歴（直近{len(rows)}週）",
+            description="\n".join(lines),
+            color=0x3498DB,
+        )
+        embed.set_footer(text=f"対応率: {handled_count}/{len(rows)} ({handled_count / len(rows) * 100:.0f}%)")
+        await ctx.send(embed=embed)
+
+    @commands.command(name='出欠率')
+    @commands.has_permissions(administrator=True)
+    async def show_attendance_rate(self, ctx, weeks: int = 8):
+        weeks = max(1, min(weeks, 52))
+        target_role = discord.utils.get(ctx.guild.roles, name=self.TARGET_ROLE_NAME)
+        if not target_role:
+            return await ctx.send(embed=discord.Embed(title="❌ エラー", description="対象ロールが見つかりません。", color=0xE74C3C))
+
+        week_rows = await db.fetchall(
+            "SELECT DISTINCT week_start FROM attendance_weekly WHERE guild_id = ? ORDER BY week_start DESC LIMIT ?",
+            (ctx.guild.id, weeks),
+        )
+        if not week_rows:
+            return await ctx.send(embed=discord.Embed(title="出欠率", description="記録がまだありません。", color=0x95A5A6))
+        week_starts = [r['week_start'] for r in week_rows]
+        placeholders = ",".join("?" for _ in week_starts)
+
+        entries = []
+        for member in target_role.members:
+            if member.bot:
+                continue
+            rows = await db.fetchall(
+                f"SELECT status, COUNT(*) as cnt FROM attendance_weekly "
+                f"WHERE guild_id = ? AND user_id = ? AND week_start IN ({placeholders}) "
+                f"GROUP BY status",
+                (ctx.guild.id, member.id, *week_starts),
+            )
+            if not rows:
+                continue
+            counts = {r['status']: r['cnt'] for r in rows}
+            vc = counts.get('vc', 0)
+            excused = counts.get('excused', 0)
+            absent = counts.get('absent', 0)
+            total = vc + excused + absent
+            handled_rate = (vc + excused) / total * 100
+            line = (
+                f"{member.display_name}: 対応 {vc + excused}/{total}週 ({handled_rate:.0f}%) "
+                f"｜🎤{vc} 📝{excused} ❌{absent}"
+            )
+            entries.append((handled_rate, line))
+
+        if not entries:
+            return await ctx.send(embed=discord.Embed(title="出欠率", description="記録がまだありません。", color=0x95A5A6))
+
+        entries.sort(key=lambda x: x[0])
+        embed = discord.Embed(
+            title=f"出欠率（直近{len(week_starts)}週・対応率が低い順）",
+            description="\n".join(text for _, text in entries),
+            color=0x3498DB,
+        )
+        embed.set_footer(text="対応率 = (VC参加 + 欠席理由承認) / 集計週数")
+        await ctx.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(VoiceLoggerCog(bot))
