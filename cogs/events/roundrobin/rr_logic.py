@@ -14,6 +14,25 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+EMBED_FIELD_VALUE_LIMIT = 1024
+
+def join_names_safe(names: List[str], sep: str = "\n", limit: int = EMBED_FIELD_VALUE_LIMIT) -> str:
+    """Embedのフィールド値は1024文字までのため、チーム人数が多い場合でも安全に収まるよう
+    超過分を省略表示にする（人数上限なしでチームを組めるようにしたための保険）。"""
+    joined = sep.join(names)
+    if len(joined) <= limit:
+        return joined
+    result = []
+    length = 0
+    for i, name in enumerate(names):
+        suffix = f"\n…他{len(names) - i}名"
+        if length + len(name) + len(sep) + len(suffix) > limit:
+            result_str = sep.join(result)
+            return f"{result_str}{suffix}"
+        result.append(name)
+        length += len(name) + len(sep)
+    return joined
+
 def generate_round_robin_schedule(teams: List[RR_Team]) -> List[Tuple[int, RR_Team, RR_Team]]:
     schedule = []
     local_teams = list(teams)
@@ -175,31 +194,6 @@ async def send_match_schedule(cog: "RoundRobinCog", channel: discord.TextChannel
     msg = await channel.send(embed=embed, file=file)
     cog.db.execute("UPDATE rr_tournaments SET message_id = ? WHERE guild_id = ?", (msg.id, guild_id))
 
-# ▼▼▼ 新規追加: 結果報告通知用関数 ▼▼▼
-async def report_match_result(cog: "RoundRobinCog", guild_id: int, team1_name: str, score1: int, score2: int, team2_name: str):
-    """承認された試合結果をチャンネルに通知する"""
-    # 通知先チャンネルの特定: rr_channel_id設定があればそこ、なければシステムメッセージ用など
-    channel = None
-    if cog.rr_channel_id:
-        channel = cog.bot.get_channel(cog.rr_channel_id)
-    
-    if not channel:
-        # 設定がない場合は、configのパネル設置チャンネルを探す
-        config = cog.db.fetchone("SELECT panel_channel_id FROM rr_config WHERE guild_id = ?", (guild_id,))
-        if config and config['panel_channel_id']:
-            channel = cog.bot.get_channel(config['panel_channel_id'])
-
-    if channel:
-        embed = discord.Embed(title="🔥 試合結果確定", color=discord.Color.orange())
-        winner = team1_name if score1 > score2 else (team2_name if score2 > score1 else "引き分け")
-        embed.add_field(name="対戦カード", value=f"**{team1_name}** vs **{team2_name}**", inline=False)
-        embed.add_field(name="スコア", value=f"{score1} - {score2}", inline=False)
-        embed.add_field(name="勝者", value=winner, inline=False)
-        try:
-            await channel.send(embed=embed)
-        except:
-            pass # 送れなくてもエラーにはしない
-
 async def finish_tournament(cog: "RoundRobinCog", channel: discord.TextChannel):
     guild_id = channel.guild.id
     guild = channel.guild
@@ -242,7 +236,8 @@ async def finish_tournament(cog: "RoundRobinCog", channel: discord.TextChannel):
         # 優勝チーム情報の構築
         winner_team = sorted_teams[0]
         winner_members = cog.db.fetchall("SELECT display_name FROM rr_players WHERE team_id = ?", (winner_team['team_id'],))
-        member_names = ", ".join([m['display_name'] for m in winner_members])
+        # 他の固定テキストと同じフィールドに収めるため、余裕を持たせた上限で安全に省略する
+        member_names = join_names_safe([m['display_name'] for m in winner_members], sep=", ", limit=900)
 
         embed = discord.Embed(title="🏆 全試合終了！ 最終結果発表 🏆", color=discord.Color.gold())
         embed.set_image(url="attachment://schedule_final.png")
@@ -251,7 +246,13 @@ async def finish_tournament(cog: "RoundRobinCog", channel: discord.TextChannel):
             value=f"**メンバー:** {member_names}\n**戦績:** {winner_team['wins']}勝 {winner_team['losses']}敗 (総得点: {winner_team['score_for']})",
             inline=False
         )
-        
+        standings_str = "\n".join(
+            f"**{i + 1}位**: {team['name']} ({team['wins']}勝 {team['losses']}敗 / 総得点: {team['score_for']})"
+            for i, team in enumerate(sorted_teams)
+        )
+        embed.add_field(name="📊 最終順位", value=standings_str, inline=False)
+
+
         # ▼▼▼ 履歴保存処理 ▼▼▼
         try:
             # history_tournaments に保存
@@ -301,7 +302,8 @@ async def finish_tournament(cog: "RoundRobinCog", channel: discord.TextChannel):
 
 async def execute_next_round(cog: "RoundRobinCog", ctx_or_interaction):
     if isinstance(ctx_or_interaction, discord.Interaction): await ctx_or_interaction.response.defer()
-    guild_id = ctx_or_interaction.guild.id; target_channel = await cog._get_rr_channel(ctx_or_interaction)
+    guild_id = ctx_or_interaction.guild.id
+    main_ch, match_ch = cog._resolve_rr_channels(ctx_or_interaction.guild, ctx_or_interaction.channel)
     tourney_info = cog.db.fetchone("SELECT current_round FROM rr_tournaments WHERE guild_id = ?", (guild_id,))
     if not tourney_info: return
     current_round = tourney_info['current_round']
@@ -314,53 +316,58 @@ async def execute_next_round(cog: "RoundRobinCog", ctx_or_interaction):
     for match in completed_matches:
         if match['message_id']:
             try:
-                msg = await target_channel.fetch_message(match['message_id'])
+                msg = await match_ch.fetch_message(match['message_id'])
                 await msg.edit(view=None)
             except (discord.NotFound, discord.Forbidden): pass
     next_round = current_round + 1
     if not cog.db.fetchone("SELECT 1 FROM rr_matches WHERE guild_id = ? AND round_num = ?", (guild_id, next_round)):
-        await finish_tournament(cog, target_channel)
+        await finish_tournament(cog, main_ch)
     else:
         cog.db.execute("UPDATE rr_tournaments SET current_round = ? WHERE guild_id = ?", (next_round, guild_id))
-        await send_match_schedule(cog, target_channel, is_update=False)
-        await send_round_match_cards(cog, target_channel, next_round)
+        await send_match_schedule(cog, main_ch, is_update=False)
+        await send_round_match_cards(cog, match_ch, next_round)
+
+def build_match_card_embed(cog: "RoundRobinCog", match_id: int) -> discord.Embed:
+    """「対戦中」状態の対戦カードEmbedを構築する。
+
+    初回の対戦カード送信だけでなく、結果報告が却下された際に同じ1枚のカードを
+    この状態へ差し戻すためにも使う（結果報告・承認待ち・確定は1枚のカードを
+    状態遷移させて表現する設計）。
+    """
+    match = cog.db.fetchone("SELECT guild_id, team1_id, team2_id FROM rr_matches WHERE match_id = ?", (match_id,))
+    team1_name = cog.db.fetchone("SELECT name FROM rr_teams WHERE team_id = ?", (match['team1_id'],))['name']
+    team2_name = cog.db.fetchone("SELECT name FROM rr_teams WHERE team_id = ?", (match['team2_id'],))['name']
+    tourney_info = cog.db.fetchone("SELECT member_order FROM rr_tournaments WHERE guild_id = ? AND is_active = 1", (match['guild_id'],))
+    member_order = tourney_info['member_order'] if tourney_info else 'random'
+    team1_players_data = cog.db.fetchall("SELECT display_name FROM rr_players WHERE team_id = ? ORDER BY position ASC", (match['team1_id'],))
+    team2_players_data = cog.db.fetchall("SELECT display_name FROM rr_players WHERE team_id = ? ORDER BY position ASC", (match['team2_id'],))
+    team1_members = [p['display_name'] for p in team1_players_data]
+    team2_members = [p['display_name'] for p in team2_players_data]
+    if member_order == 'random':
+        random.shuffle(team1_members)
+        random.shuffle(team2_members)
+    team1_members_str = join_names_safe(team1_members) or "メンバーなし"
+    team2_members_str = join_names_safe(team2_members) or "メンバーなし"
+    embed = discord.Embed(title=f"対戦: {team1_name} vs {team2_name}", description="対戦終了後、代表者が「結果報告」ボタンを押してください。", color=discord.Color.gold())
+    embed.add_field(name=f"**{team1_name}**", value=team1_members_str, inline=True)
+    embed.add_field(name=f"**{team2_name}**", value=team2_members_str, inline=True)
+    return embed
 
 async def send_round_match_cards(cog: "RoundRobinCog", channel: discord.TextChannel, round_num: int):
     guild_id = channel.guild.id
     matches = cog.db.fetchall("SELECT * FROM rr_matches WHERE guild_id = ? AND round_num = ? AND status = 'pending'", (guild_id, round_num))
     if not matches: return
     from .rr_views import ReportResultView
-    tourney_info = cog.db.fetchone("SELECT member_order, participant_role_id FROM rr_tournaments WHERE guild_id = ? AND is_active = 1", (guild_id,))
+    tourney_info = cog.db.fetchone("SELECT participant_role_id FROM rr_tournaments WHERE guild_id = ? AND is_active = 1", (guild_id,))
     role_id = tourney_info['participant_role_id'] if tourney_info else None
     role_mention = f"<@&{role_id}>" if role_id else ""
     await channel.send(f"**--- 第 {round_num} 節 ---**\n{role_mention}")
     view = ReportResultView()
     for match in matches:
-        team1_name = cog.db.fetchone("SELECT name FROM rr_teams WHERE team_id = ?", (match['team1_id'],))['name']
-        team2_name = cog.db.fetchone("SELECT name FROM rr_teams WHERE team_id = ?", (match['team2_id'],))['name']
-        member_order = tourney_info['member_order'] if tourney_info else 'random'
-        team1_players_data = cog.db.fetchall("SELECT display_name FROM rr_players WHERE team_id = ? ORDER BY position ASC", (match['team1_id'],))
-        team2_players_data = cog.db.fetchall("SELECT display_name FROM rr_players WHERE team_id = ? ORDER BY position ASC", (match['team2_id'],))
-        team1_members = [p['display_name'] for p in team1_players_data]
-        team2_members = [p['display_name'] for p in team2_players_data]
-        if member_order == 'random':
-            random.shuffle(team1_members)
-            random.shuffle(team2_members)
-        team1_members_str = "\n".join(team1_members) or "メンバーなし"
-        team2_members_str = "\n".join(team2_members) or "メンバーなし"
-        embed = discord.Embed(title=f"対戦: {team1_name} vs {team2_name}", description="対戦終了後、代表者が「結果報告」ボタンを押してください。", color=discord.Color.gold())
-        embed.add_field(name=f"**{team1_name}**", value=team1_members_str, inline=True)
-        embed.add_field(name=f"**{team2_name}**", value=team2_members_str, inline=True)
+        embed = build_match_card_embed(cog, match['match_id'])
         msg = await channel.send(embed=embed, view=view)
         cog.db.execute("UPDATE rr_matches SET message_id = ? WHERE match_id = ?", (msg.id, match['match_id']))
 
 async def get_joinable_teams(cog: "RoundRobinCog", guild_id: int) -> List[dict]:
-    """参加可能なチームのリストを取得する"""
-    teams = cog.db.fetchall("SELECT team_id, name FROM rr_teams WHERE guild_id = ?", (guild_id,))
-    max_players_hard_limit = 5 
-    joinable_teams = []
-    for team in teams:
-        count = cog.db.fetchone("SELECT COUNT(*) as c FROM rr_players WHERE team_id = ?", (team['team_id'],))['c']
-        if count < max_players_hard_limit:
-            joinable_teams.append(team)
-    return joinable_teams
+    """参加可能なチームのリストを取得する（人数上限なし、誰でも参加可能）"""
+    return cog.db.fetchall("SELECT team_id, name FROM rr_teams WHERE guild_id = ?", (guild_id,))

@@ -119,8 +119,8 @@ async def send_regular_announcement():
 async def custom_help(ctx):
     embed = discord.Embed(title="🏆 Botコマンド一覧", description="このBotで利用できるコマンドの一覧です。", color=0x00aaff)
     embed.add_field(name="⚔️ 大会・チーム分け機能", value="**`!募集`** : イベント参加者の募集を開始します。\n参加者は👍リアクションで参加し、ボタンでイベントを開始・操作します。\n**詳しくは `!ヘルプ3` を参照してください。**", inline=False)
-    embed.add_field(name="その他", value="**`!ヘルプ`** : このヘルプメッセージを表示します。\n**`!ヘルプ2`** : 音楽機能のヘルプを表示します。\n**`!ヘルプ3`** : 大会・チーム分け機能の詳細ヘルプを表示します。\n**`!ヘルプ4`** : Shadowverse戦績管理機能のヘルプを表示します。\n**`!ヘルプ5`** : チーム総当たり戦機能のヘルプを表示します。\n**`@Bot名 [メッセージ]`**: Botと会話します（Gemini）", inline=False)
-    embed.set_footer(text="Shadowverse関連のコマンドはスラッシュ(/)で入力します。")
+    embed.add_field(name="その他", value="**`!ヘルプ`** : このヘルプメッセージを表示します。\n**`!ヘルプ2`** : 音楽機能のヘルプを表示します。\n**`!ヘルプ3`** : 大会・チーム分け機能の詳細ヘルプを表示します。\n**`!ヘルプ4`** : Shadowverse戦績管理機能のヘルプを表示します。\n**`!ヘルプ5`** : チーム総当たり戦機能のヘルプを表示します。\n**`!ヘルプ6`** : 通話ログ・出欠・ルームマッチなどその他機能のヘルプを表示します。\n**`@Bot名 [メッセージ]`**: Botと会話します（Gemini）", inline=False)
+    embed.set_footer(text="Shadowverse関連コマンドの一部はスラッシュ(/)で入力します。")
     await ctx.send(embed=embed)
 
 @bot.command(name='ヘルプ2')
@@ -134,17 +134,66 @@ async def help2(ctx):
 @bot.command(name='ヘルプ4')
 async def help4(ctx):
     embed = discord.Embed(title="⚔️ Shadowverse戦績管理ヘルプ", description="戦績管理機能で利用できるコマンドやボタン操作の一覧です。", color=discord.Color.purple())
-    embed.add_field(name="【推奨】パネルからの操作", value="指定されたチャンネルにあるパネルのボタンから、直感的にほとんどの機能を利用できます。\n・**手動登録**: 1戦ずつ戦績を記録します。\n・**戦績表示**: 戦績サマリーを表示します。\n・**直近履歴**: 最新の対戦履歴を表示します。\n・**通知チャンネル設定**: 表示先チャンネルを変更します。\n・**全データ削除**: データを削除します。", inline=False)
-    embed.add_field(name="スラッシュコマンド", value="・**/replay [image]**: リプレイ画像から一括登録します。\n・**/record**, **/stats**, **/history** も利用可能です。", inline=False)
-    embed.add_field(name="テキストコマンド", value="**`!panel`**: 操作パネルを再設置します。", inline=False)
+    embed.add_field(
+        name="【推奨】パネルからの操作",
+        value="指定されたチャンネルにあるパネルのボタンから、直感的にほとんどの機能を利用できます。\n・**戦績表示**: 戦績サマリーを表示します。\n・**直近履歴**: 最新の対戦履歴を表示します（個別削除も可能）。\n・**手動登録**: 1戦ずつ戦績を記録します。",
+        inline=False,
+    )
+    embed.add_field(
+        name="スラッシュコマンド",
+        value="・**/replay [image]**: リプレイ画像から一括登録します。\n・**/record**: パネルと同じ手動登録を開始します。\n・**/stats [期間] [クラス]**: 戦績サマリーを表示します。\n・**/history [件数]**: 直近の戦績を表示します。\n・**/deletestats**: 自分の全戦績データを削除します。\n・**/card**: カード情報をランダムに1枚表示します。",
+        inline=False,
+    )
+    embed.add_field(
+        name="管理者用コマンド",
+        value="・**!svパネル設置**: 操作パネルを設置します。\n・**!sv通知チャンネル設定 <@メンバー> <#チャンネル>**: メンバーの結果通知先を設定します。\n・**!sv通知チャンネル一覧**: 通知チャンネルの登録状況を確認します。\n・**!season_start [YYYY-MM-DD]**: 今期開始日を確認/変更します。",
+        inline=False,
+    )
+    embed.add_field(
+        name="その他",
+        value="・**!svchannel view / clear**: 自分の通知チャンネルを確認/解除します。",
+        inline=False,
+    )
+    embed.set_footer(text="通知チャンネルの設定は自分では変更できません。管理者にご依頼ください。")
+    await ctx.send(embed=embed)
+
+@bot.command(name='ヘルプ6')
+async def help6(ctx):
+    embed = discord.Embed(title="🎙️ 通話ログ・出欠・その他機能", description="VC入退室ログ、定例出欠管理、ルームマッチ募集などの機能です。", color=discord.Color.teal())
+    embed.add_field(
+        name="通話ログ・定例出欠",
+        value="VCの入退室は自動でログ・通知されます。\n・**!出欠率 [週数]**: 出欠対応率を低い順に一覧表示します（管理者用）。\n・**!出欠履歴 [@メンバー] [週数]**: 週別の出欠履歴を確認します（管理者用）。\n・**!メンション対象確認**: 今週の定例通知対象者を確認します（管理者用）。\n・**!定例通知スキップ / 確認**: 今週の定例通知をスキップ/状態確認します（管理者用）。",
+        inline=False,
+    )
+    embed.add_field(
+        name="サブアカウント管理",
+        value="・**!サブ垢登録 <main_id> <sub_id> / !サブ垢削除 <sub_id>**: サブアカウントを登録/削除します（管理者用）。\n・**!サブ垢一覧**: 現在の登録状況を確認します。",
+        inline=False,
+    )
+    embed.add_field(
+        name="ルームマッチ募集",
+        value="・**!ルムマ募集パネル設置**: 募集パネルを設置します（管理者用）。\nパネルの「ルムマ募集」ボタンで@everyone付きの募集メッセージを送信します。",
+        inline=False,
+    )
+    embed.add_field(
+        name="その他",
+        value="・**@Bot名 [メッセージ]**: Gemini AIと会話します。\n・**/card**: Shadowverseのカード情報をランダム表示します。",
+        inline=False,
+    )
     await ctx.send(embed=embed)
 
 @bot.command(name='ヘルプ5')
 async def help5(ctx):
     embed = discord.Embed(title="⚔️ チーム総当たり戦 ヘルプ", description="チームを組んで総当たり戦を行うための機能です。", color=discord.Color.blue())
+    embed.add_field(
+        name="【最短ルート】チーム分けからそのまま開始",
+        value="`!募集` → 「チーム分け」ボタンでランダムにチーム分けした後、結果メッセージの「⚔️ この分け方で総当たり戦を開始」ボタンを押すとチーム名の確認・変更画面が開きます。「開始」を押せば、チーム登録から開始まで自動で行われます。",
+        inline=False,
+    )
     embed.add_field(name="【基本】パネルからの操作", value="管理者が `!総当たりパネル` で設置したパネルから操作します。\n・**チーム作成**: チームを作りリーダーになります。\n・**チームに参加/脱退**: チームへの出入りを行います。", inline=False)
     embed.add_field(name="コマンド管理", value="**`!チーム登録`**, **`!チームメンバー追加`**, **`!チーム取消`**", inline=False)
     embed.add_field(name="大会進行", value="**`!総当たり開始`**, **`!次節`**, **`!順位`**, **`!総当たり中止`**", inline=False)
+    embed.set_footer(text="結果発表・対戦表は !sd設定メイン、対戦カード・結果報告は !sd設定対戦 のチャンネルに送信されます（大会機能と共通）。")
     await ctx.send(embed=embed)
 
 # --- Botのメイン処理 ---

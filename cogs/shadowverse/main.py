@@ -14,6 +14,7 @@ from .sv_db import (
     save_records_to_db,
     get_guild_season_start_date,
     set_guild_season_start_date,
+    delete_all_user_records,
 )
 from .sv_utils import (
     extract_text_from_image,
@@ -23,7 +24,7 @@ from .sv_utils import (
     get_recent_matches,
 )
 from .ocr_manager import OCRManager
-from .sv_ui import ManualRecordView, ControlPanelView, DeleteHistoryView
+from .sv_ui import ManualRecordView, DeleteHistoryView
 
 
 class ShadowverseCog(commands.Cog):
@@ -31,7 +32,6 @@ class ShadowverseCog(commands.Cog):
         self.bot = bot
         self.ocr: DocumentAnalyzer | None = None
         self.model_load_task = asyncio.create_task(self._initialize_model())
-        self.bot.add_view(ControlPanelView(self.bot))
         # OCR処理の排他制御用Lock（他ユーザーと並列実行を防ぐ）
         self.ocr_lock = asyncio.Lock()
 
@@ -202,20 +202,6 @@ class ShadowverseCog(commands.Cog):
                 os.remove(temp_image_path)
 
     # --- コマンド定義 ---
-
-    @commands.command(name="panel")
-    async def deploy_panel(self, ctx: commands.Context):
-        """コントロールパネルを設置します。"""
-        embed = discord.Embed(
-            title="⚔️ シャドウバース 戦績管理パネル ⚔️",
-            description="下のボタンから各機能をご利用ください。\n\n**⚠️ まずはじめに、`⚙️ 通知チャンネル設定` ボタンから結果を投稿する個人チャンネルを設定してください。**",
-            color=discord.Color.purple(),
-        )
-        await ctx.send(embed=embed, view=ControlPanelView(self.bot))
-        try:
-            await ctx.message.delete()
-        except discord.Forbidden:
-            pass
 
     @app_commands.command(
         name="record", description="ボタン操作で戦績を手動で登録します。"
@@ -433,6 +419,59 @@ class ShadowverseCog(commands.Cog):
             author_id=interaction.user.id, records=records, original_embed=embed
         )
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    @app_commands.command(
+        name="deletestats", description="自分の戦績データを全て削除します。"
+    )
+    async def delete_stats(self, interaction: discord.Interaction):
+        confirm_view = discord.ui.View(timeout=30.0)
+
+        yes_button = discord.ui.Button(
+            label="はい、全て削除します", style=discord.ButtonStyle.danger
+        )
+        no_button = discord.ui.Button(
+            label="いいえ、キャンセル", style=discord.ButtonStyle.secondary
+        )
+
+        async def yes_callback(inner_interaction: discord.Interaction):
+            if interaction.user.id != inner_interaction.user.id:
+                await inner_interaction.response.send_message(
+                    "この操作は本人しか行えません。", ephemeral=True
+                )
+                return
+            await inner_interaction.response.edit_message(
+                content="全データを削除中です...", view=None
+            )
+            deleted_rows = await delete_all_user_records(inner_interaction.user.id)
+            final_message = (
+                f"✅ あなたの戦績データ **{deleted_rows}件** をすべて削除しました。"
+                if deleted_rows > 0
+                else "ℹ️ あなたの戦績データは見つかりませんでした。"
+            )
+            await inner_interaction.edit_original_response(
+                content=final_message, view=None
+            )
+
+        async def no_callback(inner_interaction: discord.Interaction):
+            if interaction.user.id != inner_interaction.user.id:
+                await inner_interaction.response.send_message(
+                    "この操作は本人しか行えません。", ephemeral=True
+                )
+                return
+            await inner_interaction.response.edit_message(
+                content="削除をキャンセルしました。", view=None
+            )
+
+        yes_button.callback = yes_callback
+        no_button.callback = no_callback
+        confirm_view.add_item(yes_button)
+        confirm_view.add_item(no_button)
+
+        await interaction.response.send_message(
+            "本当にあなたの全ての戦績データを削除しますか？この操作は取り消せません。",
+            view=confirm_view,
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot):

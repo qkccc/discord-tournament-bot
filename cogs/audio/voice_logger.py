@@ -384,7 +384,12 @@ class VoiceLoggerCog(commands.Cog):
     async def list_sub_accounts(self, ctx):
         rows = await db.fetchall("SELECT main_user_id, sub_user_id FROM user_sub_accounts")
         if not rows: return await ctx.send("登録なし")
-        lines = [f"{r['main_user_id']} → {r['sub_user_id']}" for r in rows]
+
+        def _label(user_id: int) -> str:
+            member = ctx.guild.get_member(user_id) if ctx.guild else None
+            return member.mention if member else f"ID: {user_id}（見つかりません）"
+
+        lines = [f"・{_label(r['main_user_id'])} → {_label(r['sub_user_id'])}" for r in rows]
         await ctx.send(embed=discord.Embed(title="サブアカウント一覧", description="\n".join(lines), color=0x3498DB))
 
     @commands.command(name='出欠履歴')

@@ -44,33 +44,27 @@ class MatchResultApprovalView(discord.ui.View):
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = interaction.client.get_cog("RoundRobin")
         if not cog: return
-        
+
         await interaction.response.defer()
-        
-        # 結果確定処理
+
+        # 結果確定処理（対戦カード自体を「確定」状態へ編集する。承認者への通知もhandle_score_report内で完結）
         await cog.handle_score_report(
-            interaction, self.message_id, self.match_id, 
-            self.team1_id, self.team2_id, 
+            interaction, self.message_id, self.match_id,
+            self.team1_id, self.team2_id,
             self.team1_score, self.team2_score
         )
-        
-        # ▼▼▼ 追加: 結果をチャンネルに通知 ▼▼▼
-        # チーム名を取得するためにDB検索が必要（ViewにはIDしか持たせていない場合）
-        # handle_score_report 内で処理するのが一番きれいだが、Viewから簡易的に通知するなら:
-        t1 = cog.db.fetchone("SELECT name FROM rr_teams WHERE team_id = ?", (self.team1_id,))
-        t2 = cog.db.fetchone("SELECT name FROM rr_teams WHERE team_id = ?", (self.team2_id,))
-        if t1 and t2:
-            from .rr_logic import report_match_result
-            await report_match_result(cog, interaction.guild.id, t1['name'], self.team1_score, self.team2_score, t2['name'])
-        # ▲▲▲ 追加ここまで ▲▲▲
-
-        await interaction.followup.edit_message(message_id=interaction.message.id, content=f"✅ 結果が承認されました！", view=None)
 
     @discord.ui.button(label="却下", style=discord.ButtonStyle.danger)
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("結果報告を却下しました。入力内容を確認して、再度報告してください。", ephemeral=True)
-        # 承認メッセージを削除
-        await interaction.message.delete()
+        cog = interaction.client.get_cog("RoundRobin")
+        if not cog:
+            return await interaction.response.send_message("エラー: 機能がロードされていません。", ephemeral=True)
+
+        # 対戦カードを「対戦中」状態へ差し戻し、再報告できるようにする
+        from .rr_logic import build_match_card_embed
+        embed = build_match_card_embed(cog, self.match_id)
+        await interaction.response.edit_message(embed=embed, view=ReportResultView())
+        await interaction.followup.send("結果報告を却下しました。対戦終了後、代表者が再度「結果報告」ボタンを押してください。", ephemeral=True)
 # ▲▲▲ 新規追加ここまで ▲▲▲
 
 
@@ -107,22 +101,28 @@ class ScoreReportModal(discord.ui.Modal, title='対戦結果報告'):
         # ここでは便宜上、報告者が属するチームIDを渡すが、部外者の場合はTeam1扱いとして承認フローに乗せる
         reporter_team_id = reporter_team['team_id'] if reporter_team else self.team1_id
 
-        # ▼▼▼ 変更点: いきなり保存せず、承認Viewを表示する ▼▼▼
+        # いきなり保存せず、承認待ちにする。新しいメッセージは送らず、対戦カード自体を
+        # 「承認待ち」状態へ編集する（結果報告・承認待ち・確定を1枚のカードの状態遷移で表す）。
         embed = discord.Embed(title="対戦結果の承認待ち", description="以下の結果が報告されました。対戦相手は内容を確認して承認してください。", color=discord.Color.orange())
         embed.add_field(name=self.team1_name, value=str(t1_score), inline=True)
         embed.add_field(name=self.team2_name, value=str(t2_score), inline=True)
         embed.set_footer(text="承認されると結果が確定します。")
 
         view = MatchResultApprovalView(
-            self.message_id, self.match_id, 
-            self.team1_id, self.team2_id, 
-            t1_score, t2_score, 
+            self.message_id, self.match_id,
+            self.team1_id, self.team2_id,
+            t1_score, t2_score,
             reporter_team_id
         )
-        
-        # 報告者にはEphemeralで見せない（全員に見えるようにして、相手チームにメンションを送るのがベストだが、今回はチャンネル送信）
-        await interaction.response.send_message(embed=embed, view=view)
-        # ▲▲▲ 変更ここまで ▲▲▲
+
+        try:
+            message = await interaction.channel.fetch_message(self.message_id)
+            await message.edit(embed=embed, view=view)
+        except (discord.NotFound, discord.Forbidden) as e:
+            log.error(f"[RR] 対戦カードの更新に失敗: {e}")
+            return await interaction.response.send_message("エラー: 対戦カードの更新に失敗しました。", ephemeral=True)
+
+        await interaction.response.send_message("結果を報告しました。対戦相手の承認をお待ちください。", ephemeral=True)
 
 
 class ReportResultView(discord.ui.View):

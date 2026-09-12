@@ -21,6 +21,7 @@ from .views import (
     ConfirmCancelView,
     TeamSplitMethodView,
     SwissResultReportView,
+    TeamSplitToRoundRobinView,
 )
 from .image_utils import create_bracket_image_from_db
 from ..debug_controller import debug_controller
@@ -648,14 +649,19 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         for i, member in enumerate(members):
             teams[valid_leaders[i % len(valid_leaders)]].append(member)
         embed = discord.Embed(title="👑 リーダー制チーム分け結果", color=0xF1C40F)
+        named_teams = []
         for l, mem in teams.items():
+            team_name = f"{l.display_name}チーム"
+            named_teams.append({"name": team_name, "members": mem})
             embed.add_field(
                 name=f"**{l.display_name}**チーム ({len(mem)}人)",
                 value="\n".join(f"・{m.display_name}" for m in mem),
                 inline=False,
             )
         await interaction.channel.send(
-            f"**チーム分け結果** (参加者: {len(participants)}人)", embed=embed
+            f"**チーム分け結果** (参加者: {len(participants)}人)",
+            embed=embed,
+            view=TeamSplitToRoundRobinView(self, named_teams),
         )
 
     async def _execute_number_team_split(
@@ -679,14 +685,19 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         for i, p in enumerate(p_list):
             teams[i % num_teams].append(p)
         embed = discord.Embed(title="🎲 チーム分け結果", color=0x58D68D)
+        named_teams = []
         for i, mem in enumerate(teams):
+            team_name = f"チーム{i + 1}"
+            named_teams.append({"name": team_name, "members": mem})
             embed.add_field(
-                name=f"**チーム{i + 1}** ({len(mem)}人)",
+                name=f"**{team_name}** ({len(mem)}人)",
                 value="\n".join(f"・{m.display_name}" for m in mem),
                 inline=False,
             )
         await interaction.channel.send(
-            f"**チーム分け結果** (参加者: {len(participants)}人)", embed=embed
+            f"**チーム分け結果** (参加者: {len(participants)}人)",
+            embed=embed,
+            view=TeamSplitToRoundRobinView(self, named_teams),
         )
 
     # ==============================================================================
@@ -1492,12 +1503,12 @@ class EventManagerCog(commands.Cog, name="EventManager"):
         )
         embed.add_field(
             name="【ステップ2】イベントを開始する",
-            value="操作パネルのボタンを押して、希望のイベントを開始します。\n\n**< トーナメント / スイスドロー >**\n- ボタンを押すと大会が開始され、対戦カードが投稿されます。\n- 試合が終わったら、勝者が自分の勝利ボタンを押します。\n- トーナメントは勝者が次の試合へ、スイスドローは全員が次のラウンドへ進みます。",
+            value="操作パネルのボタンを押して、希望のイベントを開始します。\n\n**< トーナメント / スイスドロー >**\n- ボタンを押すと大会が開始され、対戦カードが投稿されます。\n- 試合が終わったら、勝者が自分の勝利ボタンを押します。\n- トーナメントは勝者が次の試合へ、スイスドローは全員が次のラウンドへ進みます。\n\n**< チーム分け >**\n- リーダー制、またはチーム数指定でランダムにチーム分けします。\n- 分け結果の「⚔️ この分け方で総当たり戦を開始」ボタン→チーム名を確認・変更→「開始」で、そのままチーム総当たり戦（`!ヘルプ5`）に移行できます。",
             inline=False,
         )
         embed.add_field(
             name="【その他コマンド】(要管理者権限)",
-            value="**`!追加 [人数]`**: 募集中にダミー参加者を追加します。\n**`!削除 [人数]`**: 募集中にダミー参加者を削除します。\n**`!中止`**: 進行中の募集や大会を強制的に中止します。\n**`!sd設定メイン`**: 大会アナウンス用チャンネルを設定します。\n**`!sd設定対戦`**: **トーナメントとスイスドロー**の対戦カードを投稿するチャンネルを設定します。",
+            value="**`!追加 [名前]`**: 募集中にダミー参加者を追加します。\n**`!削除 [人数]`**: 募集中にダミー参加者を削除します。\n**`!中止`**: 進行中の募集や大会を強制的に中止します。\n**`!sd設定メイン`**: 大会アナウンス用チャンネルを設定します。\n**`!sd設定対戦`**: **トーナメントとスイスドロー**の対戦カードを投稿するチャンネルを設定します。",
             inline=False,
         )
         embed.set_footer(text="Botが再起動してもスイスドロー大会は自動で復元されます。")

@@ -8,9 +8,6 @@ import sqlite3  # SQLiteを扱うためにインポート
 
 # --- 定数 ---
 DB_FILE = "data/main.db"
-TARGET_CATEGORY_ID = (
-    1003574017900417094  # 通知先として選択できるチャンネルが含まれるカテゴリID
-)
 
 
 # --- データベース管理クラス ---
@@ -56,6 +53,13 @@ class DatabaseManager:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM sv_user_settings WHERE user_id = ?", (user_id,))
 
+    def _get_all_channels_sync(self) -> list[tuple[int, int]]:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT user_id, channel_id FROM sv_user_settings ORDER BY user_id"
+            )
+            return cursor.fetchall()
+
     # --- 非同期メソッド (Cogから呼び出す用) ---
     async def set_user_channel(self, user_id: int, channel_id: int):
         await asyncio.to_thread(self._set_channel_sync, user_id, channel_id)
@@ -66,63 +70,14 @@ class DatabaseManager:
     async def clear_user_channel(self, user_id: int):
         await asyncio.to_thread(self._clear_channel_sync, user_id)
 
+    async def get_all_channels(self) -> list[tuple[int, int]]:
+        return await asyncio.to_thread(self._get_all_channels_sync)
+
 
 # --- UIコンポーネント (View, Modalなど) ---
 # 修正: 同フォルダ内のモジュールからインポートするように変更
 try:
     from .sv_ui import ManualRecordView
-
-    # ConfirmDeleteViewはsv_uiにない場合があるため、必要ならここで簡易定義するかsv_uiに追加推奨ですが、一旦pass
-    class ConfirmDeleteView(ui.View):
-        def __init__(self, author_id: int):
-            super().__init__(timeout=60)
-            self.author_id = author_id
-
-        @ui.button(
-            label="本当に削除する",
-            style=discord.ButtonStyle.danger,
-            custom_id="sv_panel:confirm_delete",
-        )
-        async def confirm_delete(
-            self, interaction: discord.Interaction, button: ui.Button
-        ):
-            import logging
-
-            logger = logging.getLogger(__name__)
-            if interaction.user.id != self.author_id:
-                await interaction.response.send_message(
-                    "この操作はコマンドを実行した本人しか行えません。", ephemeral=True
-                )
-                return
-            try:
-                # データ削除処理
-                with sqlite3.connect(DB_FILE) as conn:
-                    conn.execute(
-                        "DELETE FROM sv_user_settings WHERE user_id = ?",
-                        (interaction.user.id,),
-                    )
-                    conn.execute(
-                        "DELETE FROM sv_matches WHERE user_id = ?",
-                        (interaction.user.id,),
-                    )
-                    conn.commit()
-                await interaction.response.edit_message(
-                    content="✅ あなたの全戦績データを削除しました。", view=None
-                )
-            except Exception as e:
-                import traceback
-
-                tb = traceback.format_exc()
-                logger.error(f"[ConfirmDeleteView] Exception occurred:\n{tb}")
-                try:
-                    await interaction.response.send_message(
-                        f"❌ エラーが発生しました: {e}", ephemeral=True
-                    )
-                except Exception as follow_e:
-                    logger.error(
-                        f"[ConfirmDeleteView] followup send failed: {follow_e}"
-                    )
-
     from .sv_utils import (
         generate_stats_summary_image,
         get_stats_summary,
@@ -134,9 +89,6 @@ except ImportError:
     class ManualRecordView(ui.View):
         pass
 
-    class ConfirmDeleteView(ui.View):
-        pass
-
     def get_stats_summary(user_id, period, class_name=None, season_start_date=None):
         return discord.Embed(title="Error")
 
@@ -145,120 +97,6 @@ except ImportError:
 
     async def get_guild_season_start_date(guild_id):
         return None
-
-
-class ChannelSelectView(ui.View):
-    def __init__(
-        self,
-        channels: list[discord.TextChannel],
-        author_id: int,
-        db_manager: DatabaseManager,
-    ):
-        super().__init__(timeout=120.0)
-        self.author_id = author_id
-        self.db_manager = db_manager
-        # ページング対応: Discord の Select は最大25選択肢までしか持てないため、
-        # カテゴリ内のチャンネルが多い場合はページ切替で全件参照できるようにする
-        self.channels = channels
-        self.per_page = 25
-        self.page = 0
-        self.select_menu: ui.Select | None = None
-        self._build_view()
-
-    async def on_select_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        selected_channel_id = int(interaction.data["values"][0])
-        await self.db_manager.set_user_channel(interaction.user.id, selected_channel_id)
-        selected_channel = interaction.guild.get_channel(selected_channel_id)
-        for item in self.children:
-            item.disabled = True
-        await interaction.edit_original_response(
-            content=f"✅ 通知チャンネルを **{selected_channel.mention}** に設定しました。",
-            view=self,
-        )
-        self.stop()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "この操作はコマンドを実行した本人しか行えません。", ephemeral=True
-            )
-            return False
-        return True
-
-    def _build_view(self):
-        # 既存の子要素をクリアして再構築
-        for child in list(self.children):
-            try:
-                self.remove_item(child)
-            except Exception:
-                pass
-
-        start = self.page * self.per_page
-        end = start + self.per_page
-        page_channels = self.channels[start:end]
-
-        options = []
-        for ch in page_channels:
-            # description に ID を入れて識別を容易にする
-            options.append(
-                discord.SelectOption(
-                    label=ch.name, value=str(ch.id), description=f"ID: {ch.id}"
-                )
-            )
-
-        # 選択肢が空の場合は代替のメッセージ表示用のボタンのみを残す
-        if options:
-            self.select_menu = ui.Select(
-                placeholder=f"通知先にしたいチャンネルを選択してください... (ページ {self.page + 1})",
-                options=options,
-            )
-            self.select_menu.callback = self.on_select_submit
-            self.add_item(self.select_menu)
-
-        # ページ移動ボタン
-        prev_disabled = self.page <= 0
-        next_disabled = end >= len(self.channels)
-
-        prev_button = ui.Button(
-            label="◀️ 前のページ",
-            style=discord.ButtonStyle.secondary,
-            disabled=prev_disabled,
-            custom_id=f"sv_channel_prev:{self.page}",
-        )
-        prev_button.callback = self._prev_page
-        self.add_item(prev_button)
-
-        next_button = ui.Button(
-            label="次のページ ▶️",
-            style=discord.ButtonStyle.secondary,
-            disabled=next_disabled,
-            custom_id=f"sv_channel_next:{self.page}",
-        )
-        next_button.callback = self._next_page
-        self.add_item(next_button)
-
-    async def _prev_page(self, interaction: discord.Interaction):
-        if interaction.user.id != self.author_id:
-            return await interaction.response.send_message(
-                "この操作はコマンドを実行した本人しか行えません。", ephemeral=True
-            )
-        if self.page <= 0:
-            return await interaction.response.defer()
-        self.page -= 1
-        self._build_view()
-        await interaction.response.edit_message(content=None, view=self)
-
-    async def _next_page(self, interaction: discord.Interaction):
-        if interaction.user.id != self.author_id:
-            return await interaction.response.send_message(
-                "この操作はコマンドを実行した本人しか行えません。", ephemeral=True
-            )
-        if (self.page + 1) * self.per_page >= len(self.channels):
-            return await interaction.response.defer()
-        self.page += 1
-        self._build_view()
-        await interaction.response.edit_message(content=None, view=self)
 
 
 # (以降のView, ModalもDBマネージャーを使うように修正済み)
@@ -404,26 +242,50 @@ class HistoryCountModal(ui.Modal, title="履歴の表示件数"):
                 logger.error(f"[HistoryCountModal] followup send failed: {follow_e}")
 
 
-class ShadowversePersistentPanel(ui.View):
+PANEL_TITLE = "### ⚔️ シャドウバース 戦績管理パネル ⚔️"
+PANEL_DESCRIPTION = "下の各ボタンから戦績の記録や確認ができます。"
+
+
+class ShadowversePersistentPanel(ui.LayoutView):
+    """Components V2 (Container) 版の永続パネル。custom_id は旧パネルと互換のため据え置き。"""
+
     def __init__(self, bot_instance: commands.Bot, db_manager: DatabaseManager):
         super().__init__(timeout=None)
         self.bot = bot_instance
         self.db_manager = db_manager
 
-    @ui.button(
-        label="手動登録", style=discord.ButtonStyle.success, custom_id="sv_panel:record"
-    )
-    async def record(self, interaction: discord.Interaction, button: ui.Button):
+        stats_button = ui.Button(
+            label="戦績表示", style=discord.ButtonStyle.primary, custom_id="sv_panel:stats"
+        )
+        stats_button.callback = self.stats
+
+        history_button = ui.Button(
+            label="直近履歴", style=discord.ButtonStyle.secondary, custom_id="sv_panel:history"
+        )
+        history_button.callback = self.history
+
+        record_button = ui.Button(
+            label="手動登録", style=discord.ButtonStyle.success, custom_id="sv_panel:record"
+        )
+        record_button.callback = self.record
+
+        container = ui.Container(
+            ui.TextDisplay(PANEL_TITLE),
+            ui.TextDisplay(PANEL_DESCRIPTION),
+            ui.Separator(),
+            ui.ActionRow(stats_button, history_button, record_button),
+            accent_colour=discord.Color.purple(),
+        )
+        self.add_item(container)
+
+    async def record(self, interaction: discord.Interaction):
         await interaction.response.send_message(
             embed=ManualRecordView(author_id=interaction.user.id).create_embed(),
             view=ManualRecordView(author_id=interaction.user.id),
             ephemeral=True,
         )
 
-    @ui.button(
-        label="戦績表示", style=discord.ButtonStyle.primary, custom_id="sv_panel:stats"
-    )
-    async def stats(self, interaction: discord.Interaction, button: ui.Button):
+    async def stats(self, interaction: discord.Interaction):
         await interaction.response.send_message(
             "どの期間の戦績サマリーを表示しますか？",
             view=StatsPeriodSelectView(
@@ -434,54 +296,9 @@ class ShadowversePersistentPanel(ui.View):
             ephemeral=True,
         )
 
-    @ui.button(
-        label="直近履歴",
-        style=discord.ButtonStyle.secondary,
-        custom_id="sv_panel:history",
-    )
-    async def history(self, interaction: discord.Interaction, button: ui.Button):
+    async def history(self, interaction: discord.Interaction):
         await interaction.response.send_modal(
             HistoryCountModal(bot_instance=self.bot, db_manager=self.db_manager)
-        )
-
-    @ui.button(
-        label="⚙️ 通知チャンネル設定",
-        style=discord.ButtonStyle.secondary,
-        custom_id="sv_panel:set_channel",
-        row=1,
-    )
-    async def set_channel(self, interaction: discord.Interaction, button: ui.Button):
-        category = self.bot.get_channel(TARGET_CATEGORY_ID)
-        if not category or not isinstance(category, discord.CategoryChannel):
-            return await interaction.response.send_message(
-                f"❌ 対象カテゴリが見つかりません。", ephemeral=True
-            )
-        text_channels = category.text_channels
-        if not text_channels:
-            return await interaction.response.send_message(
-                f"❌ カテゴリ内に選択可能なチャンネルがありません。", ephemeral=True
-            )
-        await interaction.response.send_message(
-            "通知先に設定したいチャンネルを以下から選択してください:",
-            view=ChannelSelectView(
-                channels=text_channels,
-                author_id=interaction.user.id,
-                db_manager=self.db_manager,
-            ),
-            ephemeral=True,
-        )
-
-    @ui.button(
-        label="全データ削除",
-        style=discord.ButtonStyle.danger,
-        custom_id="sv_panel:delete",
-        row=1,
-    )
-    async def delete(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_message(
-            "本当にあなたの全ての戦績データを削除しますか？",
-            view=ConfirmDeleteView(author_id=interaction.user.id),
-            ephemeral=True,
         )
 
 
@@ -522,17 +339,8 @@ class ShadowversePanelCog(commands.Cog):
     @commands.has_permissions(manage_channels=True)
     async def create_sv_panel(self, ctx: commands.Context):
         """シャドウバース戦績管理用のボタンパネルを設置し、メッセージIDをDBに保存します。"""
-        embed = discord.Embed(
-            title="⚔️ シャドウバース 戦績管理パネル ⚔️",
-            description=(
-                "**⚠️ まずはじめに、`⚙️ 通知チャンネル設定` ボタンから結果を投稿する個人チャンネルを設定してください。**\n\n"
-                "設定が完了したら、下の各ボタンから戦績の記録や確認ができます。\n\n"
-                "📸 **リプレイ画像からの登録**は、引き続き `/replay` をご利用ください。"
-            ),
-            color=discord.Color.purple(),
-        )
         view = ShadowversePersistentPanel(self.bot, self.db_manager)
-        message = await ctx.send(embed=embed, view=view)
+        message = await ctx.send(view=view)
         # --- メッセージIDをDBに保存 ---
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -552,9 +360,53 @@ class ShadowversePanelCog(commands.Cog):
             conn.commit()
         finally:
             conn.close()
+        print(f"[Panel設置] message_id={message.id} channel_id={message.channel.id}")
+
+    @commands.command(name="sv通知チャンネル設定")
+    @commands.has_permissions(manage_channels=True)
+    async def set_notification_channel_for_member(
+        self, ctx: commands.Context, member: discord.Member, channel: discord.TextChannel
+    ):
+        """管理者用: 指定したメンバーの戦績通知チャンネルを設定します。"""
+        await self.db_manager.set_user_channel(member.id, channel.id)
         await ctx.send(
-            f"✅ パネルを設置し、メッセージID {message.id} をDBに保存しました。"
+            embed=discord.Embed(
+                title="✅ 設定完了",
+                description=f"{member.mention} の通知チャンネルを {channel.mention} に設定しました。",
+                color=0x2ECC71,
+            )
         )
+
+    @commands.command(name="sv通知チャンネル一覧")
+    @commands.has_permissions(manage_channels=True)
+    async def list_notification_channels(self, ctx: commands.Context):
+        """管理者用: 現在の通知チャンネル登録状況を一覧表示します。"""
+        rows = await self.db_manager.get_all_channels()
+        if not rows:
+            return await ctx.send(
+                embed=discord.Embed(
+                    title="📋 通知チャンネル登録状況", description="登録なし", color=0x95A5A6
+                )
+            )
+        lines = []
+        for user_id, channel_id in rows:
+            member = ctx.guild.get_member(user_id) if ctx.guild else None
+            member_text = member.display_name if member else f"ID: {user_id}"
+            channel = ctx.guild.get_channel(channel_id) if ctx.guild else None
+            channel_text = channel.mention if channel else f"ID: {channel_id}（見つかりません）"
+            lines.append(f"・{member_text} → {channel_text}")
+        # Embedのdescription上限(4096文字)を超える場合は複数メッセージに分割
+        chunks, current = [], ""
+        for line in lines:
+            if len(current) + len(line) + 1 > 4000:
+                chunks.append(current)
+                current = ""
+            current += line + "\n"
+        if current:
+            chunks.append(current)
+        for i, chunk in enumerate(chunks):
+            title = "📋 通知チャンネル登録状況" + (f" ({i + 1}/{len(chunks)})" if len(chunks) > 1 else "")
+            await ctx.send(embed=discord.Embed(title=title, description=chunk, color=0x3498DB))
 
     # --- `!svchannel` コマンド群をこのCogに統合 ---
     @commands.group(name="svchannel", invoke_without_command=True)
@@ -562,9 +414,10 @@ class ShadowversePanelCog(commands.Cog):
         """個人通知チャンネルの管理コマンド"""
         await ctx.send(
             "**個人通知チャンネル管理コマンド**\n"
-            "・通知チャンネルの設定は、戦績管理パネルの `⚙️ 通知チャンネル設定` ボタンから行えます。\n\n"
+            "・通知チャンネルの設定は管理者が行います（`!sv通知チャンネル設定 <@メンバー> <#チャンネル>`）。\n\n"
             "`!svchannel view`: 現在設定されている通知先チャンネルを確認します。\n"
-            "`!svchannel clear`: 通知先の設定を解除します。"
+            "`!svchannel clear`: 通知先の設定を解除します。\n"
+            "`!sv通知チャンネル一覧`: 管理者用、全員の登録状況を確認します。"
         )
 
     @svchannel.command(name="view")

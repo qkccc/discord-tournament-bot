@@ -1090,26 +1090,3 @@ def get_recent_matches(user_id: int, count: int) -> tuple[Embed, list[dict]]:
     records_list = recent_df.drop(columns=["match_time_dt"]).to_dict("records")
 
     return embed, records_list
-
-
-def get_help_embed():
-    embed = Embed(
-        title="⚔️ シャドウバース戦績管理ヘルプ",
-        description="戦績管理機能で利用できるコマンドやボタン操作の一覧です。",
-        color=Color.purple(),
-    )
-    embed.add_field(
-        name="【推奨】パネルからの操作",
-        value=(
-            "このパネルのボタンから、直感的にほとんどの機能を利用できます。\n・**手動登録**: ボタン操作で1戦ずつ戦績を記録します。\n・**戦績表示**: 期間とクラスを指定して、詳細な戦績サマリーを表示します。\n・**直近履歴**: 記録した最新の対戦履歴を表示し、個別削除も可能です。\n・**通知チャンネル設定**: 戦績の表示先チャンネルを設定・変更します。\n・**全データ削除**: あなたの全データを削除します（要確認）。"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="コマンドでの操作",
-        value=(
-            "パネル操作に加えて、以下のコマンドも利用可能です。\n・**/replay [image]**: リプレイのスクリーンショットから戦績を一括登録します。\n・**/record**: ボタン操作と同じ手動登録を開始します。\n・**/stats [period] [class_name]**: 期間とクラスを指定して戦績サマリーを表示します。\n・**/history [count]**: 直近の対戦履歴を指定した件数表示し、個別削除も可能です。\n・**!panel**: このパネルを再設置する際に使用します。"
-        ),
-        inline=False,
-    )
-    return embed

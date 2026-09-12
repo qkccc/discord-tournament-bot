@@ -82,7 +82,7 @@ async def handle_leave_team(cog: "RoundRobinCog", interaction: discord.Interacti
 
 async def handle_score_report(cog: "RoundRobinCog", interaction: discord.Interaction, message_id: int, match_id: int, team1_id: int, team2_id: int, new_team1_score: int, new_team2_score: int):
     guild_id = interaction.guild.id
-    target_channel = await cog._get_rr_channel(interaction)
+    main_channel, target_channel = cog._resolve_rr_channels(interaction.guild, interaction.channel)
 
     match_data = cog.db.fetchone("SELECT team1_score, team2_score FROM rr_matches WHERE match_id = ?", (match_id,))
     is_correction = match_data and match_data['team1_score'] is not None
@@ -120,7 +120,7 @@ async def handle_score_report(cog: "RoundRobinCog", interaction: discord.Interac
         log.error(f"結果報告メッセージの編集に失敗: {e}")
 
     await interaction.followup.send("結果を訂正しました！" if is_correction else "結果を記録しました！", ephemeral=True)
-    await rr_logic.send_match_schedule(cog, target_channel, is_update=True)
+    await rr_logic.send_match_schedule(cog, main_channel, is_update=True)
     
     tourney_info = cog.db.fetchone("SELECT current_round FROM rr_tournaments WHERE guild_id = ?", (guild_id,))
     if not tourney_info: return

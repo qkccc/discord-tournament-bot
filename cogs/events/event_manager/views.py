@@ -174,20 +174,133 @@ class TeamSplitMethodView(discord.ui.View):
         if not session or not session['participants']:
             return await interaction.response.send_message("参加者がいません。", ephemeral=True)
 
-        view = TeamLeaderSelectView(self.cog, list(session['participants']))
-        await interaction.response.send_message("ドロップダウンメニューでリーダーを選択し、「確定」を押してください。", view=view, ephemeral=True)
-
+        # このメッセージはエフェメラルなので interaction.message.edit() では編集できない
+        # （通常のチャンネルメッセージ編集APIを叩いてしまい 404 Unknown Message になる）。
+        # このinteraction自体の応答として edit_message するのが正しいやり方。
         for item in self.children: item.disabled = True
-        await interaction.message.edit(view=self)
+        await interaction.response.edit_message(view=self)
+
+        view = TeamLeaderSelectView(self.cog, list(session['participants']))
+        await interaction.followup.send("ドロップダウンメニューでリーダーを選択し、「確定」を押してください。", view=view, ephemeral=True)
 
     @discord.ui.button(label="チーム数で分ける", style=discord.ButtonStyle.secondary)
     async def by_number(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # モーダル表示(send_modal)がこのinteractionへの応答そのものになるため、
+        # 同じinteractionでこのメッセージを編集することはできない（ボタンの無効化は行わない）。
         modal = TeamNumberModal()
         modal.view = self
         await interaction.response.send_modal(modal)
 
+
+class TeamRenameModal(discord.ui.Modal, title="チーム名を変更"):
+    """TeamNamingView から呼び出される、1チーム分のチーム名変更モーダル"""
+    def __init__(self, parent_view: "TeamNamingView", team_index: int):
+        super().__init__()
+        self.parent_view = parent_view
+        self.team_index = team_index
+        current_name = parent_view.teams[team_index]["name"]
+        self.name_input = discord.ui.TextInput(
+            label="新しいチーム名", default=current_name, max_length=80, required=True
+        )
+        self.add_item(self.name_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        new_name = self.name_input.value.strip()
+        if not new_name:
+            return await interaction.response.send_message("チーム名を入力してください。", ephemeral=True)
+        other_names = [t["name"] for i, t in enumerate(self.parent_view.teams) if i != self.team_index]
+        if new_name in other_names:
+            return await interaction.response.send_message(f"チーム名「{new_name}」は他のチームと重複しています。", ephemeral=True)
+        self.parent_view.teams[self.team_index]["name"] = new_name
+        self.parent_view._refresh_select()
+        await interaction.response.edit_message(embed=self.parent_view._build_embed(), view=self.parent_view)
+
+
+class TeamNamingView(discord.ui.View):
+    """チーム分け結果のチーム名を確認・変更してから、チーム総当たり戦を開始するView"""
+    def __init__(self, cog_instance, teams: list):
+        super().__init__(timeout=600)
+        self.cog = cog_instance
+        self.teams = teams  # [{"name": str, "members": [discord.Member | DummyPlayer, ...]}, ...]
+
+        self.team_select = discord.ui.Select(placeholder="チーム名を変更するチームを選択...")
+        self.team_select.callback = self._on_select
+        self.add_item(self.team_select)
+        self._refresh_select()
+
+        self.start_button = discord.ui.Button(
+            label="⚔️ この内容で総当たり戦を開始", style=discord.ButtonStyle.success, row=1
+        )
+        self.start_button.callback = self._on_start
+        self.add_item(self.start_button)
+
+    def _refresh_select(self):
+        self.team_select.options = [
+            discord.SelectOption(label=t["name"], value=str(i), description=f"{len(t['members'])}人")
+            for i, t in enumerate(self.teams)
+        ][:25]
+
+    def _build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="⚔️ チーム総当たり戦 開始前確認",
+            description="プルダウンからチームを選ぶとチーム名を変更できます。よろしければ下のボタンで開始してください。",
+            color=0xF1C40F,
+        )
+        for t in self.teams:
+            embed.add_field(
+                name=f"**{t['name']}** ({len(t['members'])}人)",
+                value="\n".join(f"・{m.display_name}" for m in t["members"]),
+                inline=False,
+            )
+        return embed
+
+    async def _on_select(self, interaction: discord.Interaction):
+        team_index = int(self.team_select.values[0])
+        await interaction.response.send_modal(TeamRenameModal(self, team_index))
+
+    async def _on_start(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
         for item in self.children: item.disabled = True
-        await interaction.message.edit(view=self)
+        try:
+            await interaction.edit_original_response(embed=self._build_embed(), view=self)
+        except discord.HTTPException:
+            pass
+
+        rr_cog = self.cog.bot.get_cog("RoundRobin")
+        if not rr_cog:
+            return await interaction.followup.send("❌ チーム総当たり戦機能が読み込まれていません。", ephemeral=True)
+
+        teams_dict = {t["name"]: t["members"] for t in self.teams}
+        ok, msg = await rr_cog.start_from_teams(interaction.guild, interaction.channel, teams_dict)
+        if not ok:
+            await interaction.followup.send(f"❌ {msg}", ephemeral=True)
+
+
+class TeamSplitToRoundRobinView(discord.ui.View):
+    """チーム分け結果から、そのままチーム総当たり戦へシームレスに移行するためのView"""
+    def __init__(self, cog_instance, teams: list):
+        super().__init__(timeout=600)
+        self.cog = cog_instance
+        self.teams = teams  # [{"name": str, "members": [...]}, ...]
+
+    @discord.ui.button(label="⚔️ この分け方で総当たり戦を開始", style=discord.ButtonStyle.success)
+    async def start_rr(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rr_cog = self.cog.bot.get_cog("RoundRobin")
+        if not rr_cog:
+            return await interaction.response.send_message("❌ チーム総当たり戦機能が読み込まれていません。", ephemeral=True)
+
+        naming_view = TeamNamingView(self.cog, [dict(t) for t in self.teams])
+        await interaction.response.send_message(
+            embed=naming_view._build_embed(), view=naming_view, ephemeral=True
+        )
+
+        for item in self.children: item.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
 
 class MainControlView(discord.ui.View):
     """募集中のメインコントロールパネル"""

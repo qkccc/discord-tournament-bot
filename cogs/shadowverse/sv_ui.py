@@ -1,6 +1,6 @@
 # cogs/shadowverse/sv_ui.py
 import discord
-from discord import ui, SelectOption, CategoryChannel, PartialEmoji
+from discord import ui, SelectOption, PartialEmoji
 import datetime
 import asyncio
 import typing
@@ -10,15 +10,12 @@ from .sv_constants import (
     RESULTS,
     TURN_ORDERS,
     CLASS_EMOJI_MAP,
-    TARGET_CATEGORY_ID,
 )
 from .sv_db import (
     save_records_to_db,
     save_user_class_archetype,
     get_user_class_archetypes,
-    set_user_channel_setting,
     delete_match_record,
-    delete_all_user_records,
     get_user_channel_setting,
     get_guild_season_start_date,
 )
@@ -398,51 +395,6 @@ class ArchetypeInputModal(ui.Modal, title="アーキタイプ入力"):
         )
 
 
-class ChannelSelectView(ui.View):
-    def __init__(self, channels: list[discord.TextChannel], author_id: int):
-        super().__init__(timeout=120.0)
-        self.author_id = author_id
-        channel_chunks = [channels[i : i + 25] for i in range(0, len(channels), 25)]
-        for i, chunk in enumerate(channel_chunks):
-            if not chunk:
-                continue
-            options = [SelectOption(label=ch.name, value=str(ch.id)) for ch in chunk]
-            placeholder = (
-                f"通知先チャンネルを選択 ({chunk[0].name} ～ {chunk[-1].name})"
-                if len(channel_chunks) > 1
-                else "通知先にしたいチャンネルを選択してください..."
-            )
-            select_menu = ui.Select(
-                placeholder=placeholder,
-                options=options,
-                custom_id=f"channel_select_menu_{i}",
-            )
-            select_menu.callback = self.on_select_submit
-            self.add_item(select_menu)
-
-    async def on_select_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        selected_channel_id = int(interaction.data["values"][0])
-        # 修正: 非同期関数なので直接 await
-        await set_user_channel_setting(interaction.user.id, selected_channel_id)
-        selected_channel = interaction.guild.get_channel(selected_channel_id)
-        for item in self.children:
-            item.disabled = True
-        await interaction.edit_original_response(
-            content=f"✅ 通知チャンネルを {selected_channel.mention} に設定しました。",
-            view=self,
-        )
-        self.stop()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "この操作はコマンドを実行した本人しか行えません。", ephemeral=True
-            )
-            return False
-        return True
-
-
 class StatsOptionsView(ui.View):
     def __init__(
         self, original_interaction: discord.Interaction, cog: "ShadowverseCog"
@@ -663,176 +615,3 @@ class DeleteHistoryView(ui.View):
         self._update_components()
         await interaction.response.edit_message(embed=self.original_embed, view=self)
 
-
-class ControlPanelView(ui.View):
-    def __init__(self, bot: "ShadowverseCog.bot"):
-        super().__init__(timeout=None)
-        self.bot = bot
-
-    @ui.button(
-        label="手動登録",
-        style=discord.ButtonStyle.success,
-        custom_id="sv_panel:record",
-        row=0,
-    )
-    async def record(self, interaction: discord.Interaction, button: ui.Button):
-        view = ManualRecordView(author_id=interaction.user.id)
-        await interaction.response.send_message(
-            embed=view.create_embed(), view=view, ephemeral=True
-        )
-
-    @ui.button(
-        label="戦績表示",
-        style=discord.ButtonStyle.primary,
-        custom_id="sv_panel:stats",
-        row=0,
-    )
-    async def stats(self, interaction: discord.Interaction, button: ui.Button):
-        cog = self.bot.get_cog("ShadowverseCog")
-        if not cog:
-            await interaction.response.send_message(
-                "エラー: Cogが見つかりません。", ephemeral=True
-            )
-            return
-        await interaction.response.send_message(
-            "表示したい期間とクラスを選択してください。",
-            view=StatsOptionsView(interaction, cog),
-            ephemeral=True,
-        )
-
-    @ui.button(
-        label="直近履歴",
-        style=discord.ButtonStyle.primary,
-        custom_id="sv_panel:history",
-        row=0,
-    )
-    async def history(self, interaction: discord.Interaction, button: ui.Button):
-        modal = ui.Modal(title="直近の履歴表示")
-        count_input = ui.TextInput(
-            label="表示する件数（1～25）", default="5", max_length=2
-        )
-        modal.add_item(count_input)
-
-        async def modal_callback(modal_interaction: discord.Interaction):
-            await modal_interaction.response.defer(thinking=True, ephemeral=True)
-            try:
-                count = int(str(count_input.value))
-                if not 1 <= count <= 25:
-                    raise ValueError
-                # 履歴取得はPandas使用のため to_thread のまま
-                embed, records = await asyncio.to_thread(
-                    get_recent_matches, modal_interaction.user.id, count
-                )
-                if not records:
-                    await modal_interaction.followup.send(embed=embed, ephemeral=True)
-                    return
-                view = DeleteHistoryView(
-                    author_id=modal_interaction.user.id,
-                    records=records,
-                    original_embed=embed,
-                )
-                await modal_interaction.followup.send(
-                    embed=embed, view=view, ephemeral=True
-                )
-            except (ValueError, TypeError):
-                await modal_interaction.followup.send(
-                    "❌ 1から25の有効な数値を入力してください。", ephemeral=True
-                )
-
-        modal.on_submit = modal_callback
-        await interaction.response.send_modal(modal)
-
-    @ui.button(
-        label="通知チャンネル設定",
-        style=discord.ButtonStyle.secondary,
-        custom_id="sv_panel:set_channel",
-        row=1,
-    )
-    async def set_channel(self, interaction: discord.Interaction, button: ui.Button):
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "この機能はサーバー内でのみ利用可能です。", ephemeral=True
-            )
-            return
-        category = self.bot.get_channel(TARGET_CATEGORY_ID)
-        if not isinstance(category, CategoryChannel):
-            return await interaction.response.send_message(
-                f"❌ 対象カテゴリ(ID: {TARGET_CATEGORY_ID})が見つかりません。",
-                ephemeral=True,
-            )
-        text_channels = category.text_channels
-        if not text_channels:
-            return await interaction.response.send_message(
-                f"❌ カテゴリ内に選択可能なチャンネルがありません。", ephemeral=True
-            )
-        await interaction.response.send_message(
-            "通知先に設定したいチャンネルを以下から選択してください:",
-            view=ChannelSelectView(
-                channels=text_channels, author_id=interaction.user.id
-            ),
-            ephemeral=True,
-        )
-
-    @ui.button(
-        label="全データ削除",
-        style=discord.ButtonStyle.danger,
-        custom_id="sv_panel:delete",
-        row=1,
-    )
-    async def delete(self, interaction: discord.Interaction, button: ui.Button):
-        confirm_view = ui.View(timeout=30.0)
-
-        yes_button = ui.Button(
-            label="はい、全て削除します", style=discord.ButtonStyle.danger
-        )
-        no_button = ui.Button(
-            label="いいえ、キャンセル", style=discord.ButtonStyle.secondary
-        )
-
-        async def yes_callback(inner_interaction: discord.Interaction):
-            if interaction.user.id != inner_interaction.user.id:
-                await inner_interaction.response.send_message(
-                    "この操作は本人しか行えません。", ephemeral=True
-                )
-                return
-
-            await inner_interaction.response.edit_message(
-                content="全データを削除中です...", view=None
-            )
-            try:
-                # 修正: 非同期関数なので直接 await
-                deleted_rows = await delete_all_user_records(inner_interaction.user.id)
-                final_message = (
-                    f"✅ あなたの戦績データ **{deleted_rows}件** をすべて削除しました。"
-                    if deleted_rows > 0
-                    else "ℹ️ あなたの戦績データは見つかりませんでした。"
-                )
-                await inner_interaction.edit_original_response(
-                    content=final_message, view=None
-                )
-            except Exception as e:
-                print(f"[/deletestats] 予期せぬエラー: {e}")
-                await inner_interaction.edit_original_response(
-                    content="❌ 削除処理中にエラーが発生しました。", view=None
-                )
-
-        async def no_callback(inner_interaction: discord.Interaction):
-            if interaction.user.id != inner_interaction.user.id:
-                await inner_interaction.response.send_message(
-                    "この操作は本人しか行えません。", ephemeral=True
-                )
-                return
-            await inner_interaction.response.edit_message(
-                content="削除をキャンセルしました。", view=None
-            )
-
-        yes_button.callback = yes_callback
-        no_button.callback = no_callback
-        confirm_view.add_item(yes_button)
-        confirm_view.add_item(no_button)
-
-        await interaction.response.send_message(
-            "本当にあなたの全ての戦績データを削除しますか？この操作は取り消せません。",
-            view=confirm_view,
-            ephemeral=True,
-        )
