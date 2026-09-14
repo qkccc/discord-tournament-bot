@@ -173,3 +173,15 @@ async def delete_match_record(user_id: int, match_time: str) -> int:
 async def delete_all_user_records(user_id: int) -> int:
     cursor = await db.execute("DELETE FROM sv_matches WHERE user_id = ?", (user_id,))
     return cursor.rowcount
+
+
+async def delete_user_records_by_match_times(user_id: int, match_times: list[str]) -> int:
+    """指定した match_time（主キー）の戦績のみを削除する。期間・クラス指定の部分削除で使う。"""
+    if not match_times:
+        return 0
+    placeholders = ",".join("?" for _ in match_times)
+    cursor = await db.execute(
+        f"DELETE FROM sv_matches WHERE user_id = ? AND match_time IN ({placeholders})",
+        (user_id, *match_times),
+    )
+    return cursor.rowcount

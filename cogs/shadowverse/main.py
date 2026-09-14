@@ -15,6 +15,7 @@ from .sv_db import (
     get_guild_season_start_date,
     set_guild_season_start_date,
     delete_all_user_records,
+    delete_user_records_by_match_times,
 )
 from .sv_utils import (
     extract_text_from_image,
@@ -22,6 +23,7 @@ from .sv_utils import (
     get_stats_summary,
     generate_stats_summary_image,
     get_recent_matches,
+    get_deletable_match_times,
 )
 from .ocr_manager import OCRManager
 from .sv_ui import ManualRecordView, DeleteHistoryView
@@ -421,13 +423,56 @@ class ShadowverseCog(commands.Cog):
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(
-        name="deletestats", description="自分の戦績データを全て削除します。"
+        name="deletestats",
+        description="自分の戦績データを削除します（期間・クラスを指定して部分削除も可能）。",
     )
-    async def delete_stats(self, interaction: discord.Interaction):
+    @app_commands.describe(
+        period="削除する期間（省略時は全期間）", class_name="削除するクラス（省略時は全クラス）"
+    )
+    @app_commands.choices(
+        period=[
+            app_commands.Choice(name="今日", value="today"),
+            app_commands.Choice(name="昨日", value="yesterday"),
+            app_commands.Choice(name="一週間", value="week"),
+            app_commands.Choice(name="今期(設定日~)", value="season"),
+            app_commands.Choice(name="全期間", value="all"),
+        ],
+        class_name=[app_commands.Choice(name=cn, value=cn) for cn in CLASS_NAMES],
+    )
+    async def delete_stats(
+        self,
+        interaction: discord.Interaction,
+        period: app_commands.Choice[str] = None,
+        class_name: app_commands.Choice[str] = None,
+    ):
+        selected_period = period.value if period else "all"
+        selected_class = class_name.value if class_name else None
+        is_full_delete = selected_period == "all" and selected_class is None
+
+        season_start_date = (
+            await get_guild_season_start_date(interaction.guild_id)
+            if interaction.guild_id
+            else None
+        )
+        match_times, period_text, class_text = await asyncio.to_thread(
+            get_deletable_match_times,
+            interaction.user.id,
+            selected_period,
+            selected_class,
+            season_start_date,
+        )
+        count = len(match_times)
+        scope_text = f"{period_text}{class_text}"
+
+        if count == 0:
+            return await interaction.response.send_message(
+                f"ℹ️ {scope_text}戦績データは見つかりませんでした。", ephemeral=True
+            )
+
         confirm_view = discord.ui.View(timeout=30.0)
 
         yes_button = discord.ui.Button(
-            label="はい、全て削除します", style=discord.ButtonStyle.danger
+            label=f"はい、{count}件削除します", style=discord.ButtonStyle.danger
         )
         no_button = discord.ui.Button(
             label="いいえ、キャンセル", style=discord.ButtonStyle.secondary
@@ -440,13 +485,18 @@ class ShadowverseCog(commands.Cog):
                 )
                 return
             await inner_interaction.response.edit_message(
-                content="全データを削除中です...", view=None
+                content="削除中です...", view=None
             )
-            deleted_rows = await delete_all_user_records(inner_interaction.user.id)
+            if is_full_delete:
+                deleted_rows = await delete_all_user_records(inner_interaction.user.id)
+            else:
+                deleted_rows = await delete_user_records_by_match_times(
+                    inner_interaction.user.id, match_times
+                )
             final_message = (
-                f"✅ あなたの戦績データ **{deleted_rows}件** をすべて削除しました。"
+                f"✅ {scope_text}戦績データ **{deleted_rows}件** を削除しました。"
                 if deleted_rows > 0
-                else "ℹ️ あなたの戦績データは見つかりませんでした。"
+                else "ℹ️ 対象の戦績データは見つかりませんでした（既に削除された可能性があります）。"
             )
             await inner_interaction.edit_original_response(
                 content=final_message, view=None
@@ -468,7 +518,7 @@ class ShadowverseCog(commands.Cog):
         confirm_view.add_item(no_button)
 
         await interaction.response.send_message(
-            "本当にあなたの全ての戦績データを削除しますか？この操作は取り消せません。",
+            f"{scope_text}戦績データ **{count}件** を削除します。本当によろしいですか？この操作は取り消せません。",
             view=confirm_view,
             ephemeral=True,
         )

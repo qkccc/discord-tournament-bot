@@ -158,6 +158,8 @@ def _build_stats_context(
     if user_df.empty:
         return None, "あなたの", class_text, "あなたの戦績データはまだありません。"
 
+    # 削除機能などでDB上の元のmatch_time文字列（主キー）が必要になるため、変換前に退避しておく
+    user_df["_raw_match_time"] = user_df["match_time"]
     user_df["match_time"] = _to_jst_datetime(user_df["match_time"])
     now = datetime.datetime.now(JST)
     today_business_date = (now - datetime.timedelta(hours=5)).date()
@@ -247,6 +249,25 @@ def _build_stats_context(
             )
 
     return user_df, period_text, class_text, None
+
+
+def get_deletable_match_times(
+    user_id: int,
+    period: str = "all",
+    class_name: str | None = None,
+    season_start_date: str | None = None,
+) -> tuple[list[str], str, str]:
+    """指定した期間・クラスに合致する戦績の match_time 一覧（sv_matches の主キー）を返す。
+
+    /stats・戦績表示と全く同じフィルタ条件（_build_stats_context）を再利用することで、
+    「表示される範囲」と「削除される範囲」が食い違わないようにしている。
+    """
+    df, period_text, class_text, _ = _build_stats_context(
+        user_id, period, class_name, season_start_date
+    )
+    if df is None:
+        return [], period_text, class_text
+    return df["_raw_match_time"].tolist(), period_text, class_text
 
 
 def _format_class_group_summary(df: pd.DataFrame, group_column: str) -> str:
