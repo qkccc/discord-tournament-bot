@@ -339,6 +339,35 @@ class DeckCog(commands.Cog):
         embed = discord.Embed(title="管理者用パネル", description="下のボタンでデッキ登録の管理を行ってください。", color=discord.Color.dark_red())
         await ctx.send(embed=embed, view=DeckAdminView(self))
 
+    @commands.command(
+        name="デッキ登録状況",
+        help="管理者用: 現在の登録状況（名前・件数のみ、デッキ画像は表示しません）を確認します。",
+    )
+    @commands.has_permissions(administrator=True)
+    async def deck_registration_status(self, ctx: commands.Context):
+        # 既存の db_get_all_decks() をそのまま使うだけの読み取り専用コマンド。
+        # 登録処理・DBスキーマには一切触れない（登録期間中でも安全に実行できる）。
+        all_decks = await self.db_get_all_decks()
+
+        lines = []
+        for user_id, deck_urls in all_decks.items():
+            member = ctx.guild.get_member(user_id) if ctx.guild else None
+            name = member.display_name if member else f"ID: {user_id}"
+            lines.append(f"・{name} ({len(deck_urls)}件)")
+
+        status_text = "受付中" if self.registration_open else "締切済み"
+        embed = discord.Embed(
+            title="📋 デッキ登録状況",
+            description=f"登録受付: **{status_text}** ／ 登録済み: **{len(all_decks)}名**",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="登録済みメンバー",
+            value="\n".join(lines) if lines else "まだ登録がありません。",
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(DeckCog(bot))
 
