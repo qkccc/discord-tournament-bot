@@ -116,6 +116,21 @@ class StartSwissModal(discord.ui.Modal, title='スイスドロー開始設定'):
         await self.view.cog._execute_start_swiss(interaction, rounds)
 
 
+class StartLeagueModal(discord.ui.Modal, title='リーグ戦開始設定'):
+    """リーグ戦(総当たり)のグループ数を入力するモーダル"""
+    num_groups_input = discord.ui.TextInput(label="グループ数", placeholder="例: 3")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            num_groups = int(self.num_groups_input.value)
+            if num_groups <= 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            return await interaction.followup.send("グループ数は1以上の半角数字で入力してください。", ephemeral=True)
+        await self.view.cog._execute_start_league(interaction, num_groups)
+
+
 class TeamNumberModal(discord.ui.Modal, title='チーム数で分ける'):
     """チーム分けでチーム数を入力するモーダル"""
     num_teams_input = discord.ui.TextInput(label="チーム数", placeholder="例: 3", required=True)
@@ -326,6 +341,13 @@ class MainControlView(discord.ui.View):
     async def start_bracket(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_participants(interaction, 2): return
         await self.cog._execute_bracket(interaction)
+
+    @discord.ui.button(label="リーグ戦", style=discord.ButtonStyle.primary, custom_id="main_league")
+    async def start_league(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_participants(interaction, 2): return
+        modal = StartLeagueModal()
+        modal.view = self
+        await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="チーム分け", style=discord.ButtonStyle.secondary, custom_id="main_teams")
     async def start_teams(self, interaction: discord.Interaction, button: discord.ui.Button):

@@ -421,6 +421,13 @@ class EventManagerCog(commands.Cog, name="EventManager"):
             return await ctx.send(
                 "現在進行中のスイスドロー大会があります。先に`!中止`コマンドで終了してください。"
             )
+        if self.db.fetchone(
+            "SELECT 1 FROM league_tournaments WHERE guild_id = ? AND is_active = 1",
+            (guild_id,),
+        ):
+            return await ctx.send(
+                "現在進行中のリーグ戦があります。先に`!リーグ中止`コマンドで終了してください。"
+            )
 
         embed = discord.Embed(
             title="🏆 イベント参加者募集 🏆",
@@ -703,6 +710,35 @@ class EventManagerCog(commands.Cog, name="EventManager"):
     # ==============================================================================
     # スイスドロー機能のメソッド
     # ==============================================================================
+    async def _execute_start_league(self, interaction: discord.Interaction, num_groups: int):
+        """個人戦リーグ戦(総当たり、複数グループ)を開始する。実際のグループ分け・
+        DB書き込みは cogs/events/league 側の LeagueCog.start_league に委譲する。"""
+        league_cog = self.bot.get_cog("League")
+        if not league_cog:
+            return await interaction.followup.send(
+                "❌ リーグ戦機能が読み込まれていません。", ephemeral=True
+            )
+
+        participants = await self._close_recruitment(
+            interaction, "リーグ戦を開始しました！"
+        )
+        if not participants:
+            return await interaction.followup.send(
+                "参加者がいないため、開始できませんでした。", ephemeral=True
+            )
+
+        guild_id = interaction.guild.id
+        main_ch, match_ch = await self._get_channels(guild_id)
+        if not main_ch:
+            main_ch = interaction.channel
+        if not match_ch:
+            match_ch = interaction.channel
+
+        ok, msg = await league_cog.start_league(
+            interaction.guild, main_ch, match_ch, participants, num_groups
+        )
+        await interaction.followup.send(("✅ " if ok else "❌ ") + msg, ephemeral=True)
+
     async def _execute_start_swiss(self, interaction: discord.Interaction, rounds: int):
         """スイスドロー大会を開始する"""
         participants = await self._close_recruitment(
@@ -1256,32 +1292,58 @@ class EventManagerCog(commands.Cog, name="EventManager"):
                         (bye_match["winner_id"], guild_id, next_match["match_id"]),
                     )
 
-            await interaction.followup.send("トーナメント表を作成中...", ephemeral=True)
-            image_file = await self.bot.loop.run_in_executor(
-                None, create_bracket_image_from_db, guild_id, self.db
+            await self._finalize_bracket_start(interaction, guild_id, num_players)
+
+    async def _finalize_bracket_start(
+        self, interaction: discord.Interaction, guild_id: int, num_players: int
+    ):
+        """se_tournaments/se_matches/event_players が投入済みの状態から、
+        ブラケット画像の生成・送信と対戦カードの送信を行う共通処理。
+        募集からのランダムシード(_execute_bracket)・リーグ戦結果からのシード
+        (_execute_bracket_from_ranking)の両方から呼ばれる。"""
+        await interaction.followup.send("トーナメント表を作成中...", ephemeral=True)
+        image_file = await self.bot.loop.run_in_executor(
+            None, create_bracket_image_from_db, guild_id, self.db
+        )
+
+        main_ch, match_ch = await self._get_channels(guild_id)
+        if not main_ch:
+            main_ch = interaction.channel
+        if not match_ch:
+            match_ch = interaction.channel
+
+        if image_file:
+            bracket_msg = await main_ch.send(
+                f"**トーナメント開始！** (参加者: {num_players}人)", file=image_file
             )
+            self.db.execute(
+                "UPDATE se_tournaments SET bracket_message_id = ? WHERE guild_id = ?",
+                (bracket_msg.id, guild_id),
+            )
+        else:
+            await main_ch.send("トーナメント表の生成に失敗しました。")
 
-            main_ch, match_ch = await self._get_channels(guild_id)
-            if not main_ch:
-                main_ch = interaction.channel
-            if not match_ch:
-                match_ch = interaction.channel
+        await self._send_ready_se_match_cards(guild_id, match_ch)
 
-            if image_file:
-                bracket_msg = await main_ch.send(
-                    f"**トーナメント開始！** (参加者: {num_players}人)", file=image_file
-                )
-                self.db.execute(
-                    "UPDATE se_tournaments SET bracket_message_id = ? WHERE guild_id = ?",
-                    (bracket_msg.id, guild_id),
-                )
-            else:
-                await main_ch.send("トーナメント表の生成に失敗しました。")
+        if main_ch.id != match_ch.id:
+            await main_ch.send(f"対戦カードを <#{match_ch.id}> に送信しました。")
 
-            await self._send_ready_se_match_cards(guild_id, match_ch)
+    async def _execute_bracket_from_ranking(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        ranked_players: List[Dict],
+    ):
+        """リーグ戦(総当たり)の結果など、既にランク付け済みの参加者リストから
+        標準シード(1位と2位が決勝まで当たらない配置)でSEトーナメントを開始する。
+        リーグ側(cogs/events/league)から呼び出される。"""
+        from . import se_seeding
 
-            if main_ch.id != match_ch.id:
-                await main_ch.send(f"対戦カードを <#{match_ch.id}> に送信しました。")
+        async with self.locks[guild_id]:
+            num_players, _ = se_seeding.seed_players_into_bracket(
+                self.db, guild_id, ranked_players
+            )
+            await self._finalize_bracket_start(interaction, guild_id, num_players)
 
     async def _handle_se_win_logic(
         self,

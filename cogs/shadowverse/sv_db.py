@@ -1,4 +1,5 @@
 # cogs/shadowverse/sv_db.py
+import os
 import sqlite3
 import pandas as pd
 from cogs.utils.constants import DB_FILE
@@ -78,6 +79,29 @@ async def get_guild_season_start_date(guild_id: int) -> str | None:
         (guild_id,),
     )
     return row["season_start_date"] if row else None
+
+
+async def get_effective_season_start_date(guild_id: int | None) -> str | None:
+    """/stats 等で使う「今期開始日」を、DMからの利用でもサーバー内と同じ結果になるように解決する。
+
+    guild_id が分かればそのサーバーの設定をそのまま返す。DM等で guild_id が無い場合は、
+    .env の APEIRON_GUILD_ID（stats_publisher.py の公開機能と共通の設定）が指す
+    サーバーの設定にフォールバックし、それも無ければ season_start_date が
+    設定されている最初のサーバーの値を使う。
+    """
+    if guild_id is not None:
+        return await get_guild_season_start_date(guild_id)
+
+    fallback_guild_id = os.getenv("APEIRON_GUILD_ID", "").strip()
+    if fallback_guild_id.isdigit():
+        return await get_guild_season_start_date(int(fallback_guild_id))
+
+    row = await db.fetchone(
+        "SELECT season_start_date FROM sv_guild_settings "
+        "WHERE season_start_date IS NOT NULL AND season_start_date != '' "
+        "ORDER BY rowid LIMIT 1"
+    )
+    return row["season_start_date"] if row and row["season_start_date"] else None
 
 
 async def save_user_class_archetype(user_id: int, class_name: str, archetype: str):

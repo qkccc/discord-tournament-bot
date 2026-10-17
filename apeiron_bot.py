@@ -110,6 +110,11 @@ TARGET_TIME = datetime.time(hour=22, minute=0, tzinfo=JST)
 @tasks.loop(time=TARGET_TIME)
 async def send_regular_announcement():
     if datetime.datetime.now(JST).weekday() != 5: return
+    # 定例通知スキップ（!定例通知スキップ）が使われた週は、5分前の@everyoneも出さない。
+    # フラグの消費（Falseへのリセット）はこの5分後に走るweekly_mention_task側でのみ行う。
+    voice_logger_cog = bot.get_cog("VoiceLoggerCog")
+    if voice_logger_cog and voice_logger_cog.skip_weekly_mention:
+        return
     channel = bot.get_channel(TARGET_CHANNEL_ID)
     if channel:
         await channel.send("@everyone 定例5分前です\n欠席の方は ⁠#定例-出欠✅ に書き込んでください")

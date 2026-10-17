@@ -13,6 +13,7 @@ from .sv_db import (
     get_user_channel_setting,
     save_records_to_db,
     get_guild_season_start_date,
+    get_effective_season_start_date,
     set_guild_season_start_date,
     delete_all_user_records,
     delete_user_records_by_match_times,
@@ -133,7 +134,23 @@ class ShadowverseCog(commands.Cog):
             )
 
         temp_image_path = f"temp_{interaction.id}_{attachment.id}.png"
-        await attachment.save(temp_image_path)
+
+        for download_attempt in range(2):
+            try:
+                await attachment.save(temp_image_path)
+                break
+            except (asyncio.TimeoutError, discord.HTTPException) as e:
+                if download_attempt == 0:
+                    await asyncio.sleep(2)
+                    continue
+                print(f"[replay] 画像ダウンロード失敗（リトライ後も失敗）: {e}")
+                embed = discord.Embed(
+                    title="リプレイ一括登録 結果",
+                    description="❌ 画像のダウンロードに失敗しました（Discordサーバーとの通信がタイムアウトしました）。しばらくしてから再度お試しください。",
+                    color=discord.Color.red(),
+                )
+                await self._send_result_embed_from_interaction(interaction, embed)
+                return
 
         try:
             # OCR 処理（重い処理）- OCRManager を使用
@@ -264,6 +281,7 @@ class ShadowverseCog(commands.Cog):
         period=[
             app_commands.Choice(name="今日", value="today"),
             app_commands.Choice(name="昨日", value="yesterday"),
+            app_commands.Choice(name="3日間", value="3days"),
             app_commands.Choice(name="一週間", value="week"),
             app_commands.Choice(name="今期(設定日~)", value="season"),
             app_commands.Choice(name="全期間", value="all"),
@@ -281,11 +299,7 @@ class ShadowverseCog(commands.Cog):
 
         selected_period = period.value if period else "today"
         selected_class = class_name.value if class_name else None
-        season_start_date = (
-            await get_guild_season_start_date(interaction.guild_id)
-            if interaction.guild_id
-            else None
-        )
+        season_start_date = await get_effective_season_start_date(interaction.guild_id)
         stats_file = await asyncio.to_thread(
             generate_stats_summary_image,
             interaction.user.id,
@@ -433,6 +447,7 @@ class ShadowverseCog(commands.Cog):
         period=[
             app_commands.Choice(name="今日", value="today"),
             app_commands.Choice(name="昨日", value="yesterday"),
+            app_commands.Choice(name="3日間", value="3days"),
             app_commands.Choice(name="一週間", value="week"),
             app_commands.Choice(name="今期(設定日~)", value="season"),
             app_commands.Choice(name="全期間", value="all"),
@@ -449,11 +464,7 @@ class ShadowverseCog(commands.Cog):
         selected_class = class_name.value if class_name else None
         is_full_delete = selected_period == "all" and selected_class is None
 
-        season_start_date = (
-            await get_guild_season_start_date(interaction.guild_id)
-            if interaction.guild_id
-            else None
-        )
+        season_start_date = await get_effective_season_start_date(interaction.guild_id)
         match_times, period_text, class_text = await asyncio.to_thread(
             get_deletable_match_times,
             interaction.user.id,

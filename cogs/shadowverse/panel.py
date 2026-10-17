@@ -83,7 +83,7 @@ try:
         get_stats_summary,
         get_recent_matches,
     )
-    from .sv_db import get_guild_season_start_date
+    from .sv_db import get_effective_season_start_date
 except ImportError:
 
     class ManualRecordView(ui.View):
@@ -95,7 +95,7 @@ except ImportError:
     def get_recent_matches(user_id, count):
         return (discord.Embed(title="Error"), [])
 
-    async def get_guild_season_start_date(guild_id):
+    async def get_effective_season_start_date(guild_id):
         return None
 
 
@@ -114,6 +114,7 @@ class StatsPeriodSelectView(ui.View):
         options=[
             discord.SelectOption(label="今日", value="today"),
             discord.SelectOption(label="昨日", value="yesterday"),
+            discord.SelectOption(label="3日間", value="3days"),
             discord.SelectOption(label="一週間", value="week"),
             discord.SelectOption(label="今期(設定日~)", value="season"),
             discord.SelectOption(label="全期間", value="all"),
@@ -124,11 +125,7 @@ class StatsPeriodSelectView(ui.View):
         await interaction.response.edit_message(
             content="統計を生成しています...", view=None
         )
-        season_start_date = (
-            await get_guild_season_start_date(interaction.guild_id)
-            if interaction.guild_id
-            else None
-        )
+        season_start_date = await get_effective_season_start_date(interaction.guild_id)
         stats_file = await asyncio.to_thread(
             generate_stats_summary_image,
             interaction.user.id,

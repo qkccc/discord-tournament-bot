@@ -46,7 +46,8 @@ sh ./docker/dockerbuild.sh
 pip install fastapi uvicorn
 
 # 2. API サーバーを起動（バックグラウンド）
-nohup python /root/discord-tournament-bot/cogs/shadowverse/ndlocr_api_server.py > /tmp/ndlocr_api.log 2>&1 &
+# ファイル名は先頭が _ のため、Discordボット本体のCog自動読み込みの対象からは除外されます
+nohup python /root/discord-tournament-bot/cogs/shadowverse/_ndlocr_api_server.py > /tmp/ndlocr_api.log 2>&1 &
 
 # または systemd サービスとして登録
 # /etc/systemd/system/ndlocr-api.service を作成して systemctl start ndlocr-api

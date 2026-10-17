@@ -7,11 +7,18 @@ import re
 import io
 from yomitoku import DocumentAnalyzer
 from discord import Embed, Color, PartialEmoji, SelectOption
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from .sv_constants import DB_FILE, CLASS_NAMES, CLASS_EMOJI_MAP, RESULTS, TURN_ORDERS
 from .sv_db import get_records_as_df
 from .sv_stats_agg import resolve_default_season_start
+from cogs.utils.image_style import (
+    _load_font,
+    _text_bbox,
+    _text_size,
+    _truncate_text,
+    _create_gradient_bg_fast,
+)
 import sqlite3
 import os
 
@@ -23,31 +30,6 @@ def _to_jst_datetime(series: pd.Series) -> pd.Series:
     if getattr(parsed.dt, "tz", None) is None:
         return parsed.dt.tz_localize(JST)
     return parsed.dt.tz_convert(JST)
-
-
-def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    paths = [
-        "assets/meiryob.ttc",
-        "C:/Windows/Fonts/meiryob.ttc",
-        "assets/meiryo.ttc",
-        "C:/Windows/Fonts/meiryo.ttc",
-        "C:/Windows/Fonts/msgothic.ttc",
-    ]
-    for p in paths:
-        try:
-            return ImageFont.truetype(p, size, index=0)
-        except IOError:
-            continue
-    return ImageFont.load_default()
-
-
-def _text_bbox(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int, int, int]:
-    return draw.textbbox((0, 0), text, font=font)
-
-
-def _text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
-    bbox = _text_bbox(draw, text, font)
-    return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
 def _draw_class_icon(
@@ -126,27 +108,6 @@ def _draw_class_icon(
     draw.text((tx, ty), initial, font=init_font, fill=(16, 20, 28))
 
 
-def _fit_font_for_box(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    max_width: int,
-    max_height: int,
-    base_size: int,
-):
-    """与えられた最大幅／高さに収まる最大フォントサイズを返す。"""
-    size = base_size
-    while size > 8:
-        try:
-            f = _load_font(size)
-        except Exception:
-            f = ImageFont.load_default()
-        w, h = _text_size(draw, text, f)
-        if w <= max_width and h <= max_height:
-            return f
-        size -= 2
-    return _load_font(10)
-
-
 def _build_stats_context(
     user_id: int,
     period: str = "all",
@@ -164,7 +125,12 @@ def _build_stats_context(
     now = datetime.datetime.now(JST)
     today_business_date = (now - datetime.timedelta(hours=5)).date()
 
-    period_text_map = {"today": "今日の", "yesterday": "昨日の", "week": "一週間の"}
+    period_text_map = {
+        "today": "今日の",
+        "yesterday": "昨日の",
+        "3days": "3日間の",
+        "week": "一週間の",
+    }
 
     resolved_season_start_date: datetime.date | None = None
     if period == "season":
@@ -208,6 +174,15 @@ def _build_stats_context(
             yesterday_business_date = today_business_date - datetime.timedelta(days=1)
             start_time, end_time = to_business_range(
                 yesterday_business_date, today_business_date
+            )
+            user_df = user_df[
+                (user_df["match_time"] >= start_time)
+                & (user_df["match_time"] < end_time)
+            ]
+        elif period == "3days":
+            start_time, end_time = to_business_range(
+                today_business_date - datetime.timedelta(days=2),
+                today_business_date + datetime.timedelta(days=1),
             )
             user_df = user_df[
                 (user_df["match_time"] >= start_time)
@@ -279,74 +254,6 @@ def _format_class_group_summary(df: pd.DataFrame, group_column: str) -> str:
     ordered_index = [name for name in CLASS_NAMES if name in grouped.index]
     remaining_index = [name for name in grouped.index if name not in ordered_index]
     return grouped.reindex(ordered_index + remaining_index).to_string()
-
-
-def _draw_card(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    title: str,
-    accent: tuple[int, int, int],
-    background: tuple[int, int, int],
-    title_font,
-):
-    left, top, right, bottom = box
-    draw.rounded_rectangle(box, radius=28, fill=background)
-    draw.rounded_rectangle(box, radius=28, outline=accent, width=4)
-    title_bbox = _text_bbox(draw, title, title_font)
-    title_height = title_bbox[3] - title_bbox[1]
-    draw.text((left + 28, top + 20), title, font=title_font, fill=(245, 247, 250))
-    draw.line((left + 24, top + 72, right - 24, top + 72), fill=accent, width=3)
-    return top + 88
-
-
-def _draw_progress_row(
-    draw: ImageDraw.ImageDraw,
-    x: int,
-    y: int,
-    width: int,
-    label: str,
-    value_text: str,
-    rate: float,
-    fill_color: tuple[int, int, int],
-    label_font,
-    value_font,
-    bar_height: int = 24,
-):
-    label_w = 170
-    value_w = 150
-    bar_w = max(10, width - label_w - value_w - 40)
-    draw.text((x, y), label, font=label_font, fill=(240, 244, 248))
-    bar_x = x + label_w
-    bar_y = y + 6
-    draw.rounded_rectangle(
-        (bar_x, bar_y, bar_x + bar_w, bar_y + bar_height),
-        radius=10,
-        fill=(56, 63, 76),
-    )
-    if rate > 0:
-        fill_w = max(4, int(bar_w * min(rate, 1.0)))
-        draw.rounded_rectangle(
-            (bar_x, bar_y, bar_x + fill_w, bar_y + bar_height),
-            radius=10,
-            fill=fill_color,
-        )
-    value_bbox = _text_bbox(draw, value_text, value_font)
-    value_h = value_bbox[3] - value_bbox[1]
-    draw.text(
-        (x + width - value_w, y + 2),
-        value_text,
-        font=value_font,
-        fill=(230, 233, 238),
-    )
-
-
-def _truncate_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
-    if _text_size(draw, text, font)[0] <= max_width:
-        return text
-    ellipsis = "…"
-    while text and _text_size(draw, text + ellipsis, font)[0] > max_width:
-        text = text[:-1]
-    return text + ellipsis if text else ellipsis
 
 
 def _draw_table_panel(
@@ -633,19 +540,6 @@ def _format_rate_record(wins: int, total: int) -> str:
         return "-"
     rate = wins / total * 100
     return f"{rate:.1f}% ({wins}勝/{total}戦)"
-
-
-def _create_gradient_bg_fast(
-    width: int, height: int, color1: tuple[int, int, int], color2: tuple[int, int, int]
-) -> Image.Image:
-    base = Image.new("RGB", (1, height))
-    for y in range(height):
-        ratio = y / height
-        r = int(color1[0] * (1 - ratio) + color2[0] * ratio)
-        g = int(color1[1] * (1 - ratio) + color2[1] * ratio)
-        b = int(color1[2] * (1 - ratio) + color2[2] * ratio)
-        base.putpixel((0, y), (r, g, b))
-    return base.resize((width, height))
 
 
 def _draw_donut_chart(

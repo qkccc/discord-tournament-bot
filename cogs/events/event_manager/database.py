@@ -136,6 +136,56 @@ class DatabaseManager:
                 )
             ''')
 
+            # --- 個人戦リーグ戦(総当たり、複数グループ)関連 ---
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS league_tournaments (
+                    guild_id INTEGER PRIMARY KEY,
+                    is_active BOOLEAN NOT NULL DEFAULT 1,
+                    num_groups INTEGER NOT NULL,
+                    standings_message_id INTEGER,
+                    standings_channel_id INTEGER
+                )
+            ''')
+
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS league_groups (
+                    group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    group_index INTEGER NOT NULL,
+                    group_name TEXT NOT NULL
+                )
+            ''')
+
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS league_players (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    display_name TEXT NOT NULL,
+                    is_dummy BOOLEAN NOT NULL DEFAULT 0,
+                    wins INTEGER NOT NULL DEFAULT 0,
+                    losses INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id),
+                    FOREIGN KEY (group_id) REFERENCES league_groups(group_id) ON DELETE CASCADE
+                )
+            ''')
+
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS league_matches (
+                    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    round_num INTEGER NOT NULL,
+                    player1_id INTEGER NOT NULL,
+                    player2_id INTEGER NOT NULL,
+                    winner_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    reporter_id INTEGER,
+                    message_id INTEGER,
+                    FOREIGN KEY (group_id) REFERENCES league_groups(group_id) ON DELETE CASCADE
+                )
+            ''')
+
             # --- テーブル構造の自動修復機能 (カラム追加チェック) ---
             # RR関連はテーブル名変更がないため、そのままチェック
             

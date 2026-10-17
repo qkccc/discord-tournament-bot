@@ -36,6 +36,7 @@ class VoiceLoggerCog(commands.Cog):
         await self._setup_database()
         await self._cleanup_stale_sessions()
         await self._recover_report_vc_state()
+        await self._recover_active_vc_sessions()
 
     def _get_env_var_as_int(self, var_name: str) -> int | None:
         val_str = os.getenv(var_name)
@@ -87,6 +88,29 @@ class VoiceLoggerCog(commands.Cog):
             if result and result[0]:
                 self.report_vc_start_time = datetime.datetime.fromisoformat(result[0])
                 print(f"復元された通話開始時刻(UTC): {self.report_vc_start_time}")
+
+    async def _recover_active_vc_sessions(self):
+        """Bot再起動時に、既に通話中の全チャンネルの開始時刻をDBから復元する。
+
+        active_vc_sessions はメモリ上のみで管理しているため、通話が進行中に
+        Botが再起動すると復元しない限り空になる。その状態でその後最後の1人が
+        退出すると、開始時刻が見つからず「通話終了」通知が出せなくなっていた
+        （たまに通話終了通知が来ない、の原因）。
+        """
+        for guild in self.bot.guilds:
+            for channel in guild.voice_channels:
+                if not channel.members:
+                    continue
+                member_ids = tuple(m.id for m in channel.members)
+                placeholders = ','.join('?' for _ in member_ids)
+                query = (
+                    f"SELECT MIN(join_time) FROM voice_sessions "
+                    f"WHERE channel_id = ? AND user_id IN ({placeholders}) AND leave_time IS NULL"
+                )
+                result = await db.fetchone(query, (channel.id, *member_ids))
+                if result and result[0]:
+                    self.active_vc_sessions[channel.id] = datetime.datetime.fromisoformat(result[0])
+                    print(f"復元された通話セッション: channel_id={channel.id} 開始時刻(UTC)={self.active_vc_sessions[channel.id]}")
 
     async def _cleanup_stale_sessions(self):
         stale_sessions = await db.fetchall("SELECT id, guild_id, user_id, channel_id FROM voice_sessions WHERE leave_time IS NULL")

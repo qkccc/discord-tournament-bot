@@ -17,11 +17,8 @@ from .sv_db import (
     get_user_class_archetypes,
     delete_match_record,
     get_user_channel_setting,
-    get_guild_season_start_date,
 )
 from .sv_utils import (
-    generate_stats_summary_image,
-    get_stats_summary,
     get_recent_matches,
 )
 
@@ -393,96 +390,6 @@ class ArchetypeInputModal(ui.Modal, title="アーキタイプ入力"):
             embed=self.parent_view.create_embed(),
             view=self.parent_view,
         )
-
-
-class StatsOptionsView(ui.View):
-    def __init__(
-        self, original_interaction: discord.Interaction, cog: "ShadowverseCog"
-    ):
-        super().__init__(timeout=120.0)
-        self.original_interaction = original_interaction
-        self.cog = cog
-        self.period = "today"
-        self.class_name = None
-        self.period_select = ui.Select(
-            placeholder="集計期間を選択...",
-            options=[
-                SelectOption(label="今日", value="today", default=True),
-                SelectOption(label="昨日", value="yesterday"),
-                SelectOption(label="一週間", value="week"),
-                SelectOption(label="今期(設定日~)", value="season"),
-                SelectOption(label="全期間", value="all"),
-            ],
-            custom_id="stats_opt_period",
-        )
-        self.period_select.callback = self.on_period_select
-        self.add_item(self.period_select)
-        class_options = [
-            SelectOption(label="全てのクラス", value="all_classes", default=True)
-        ] + [SelectOption(label=name, value=name) for name in CLASS_NAMES]
-        self.class_select = ui.Select(
-            placeholder="クラスを選択...",
-            options=class_options,
-            custom_id="stats_opt_class",
-        )
-        self.class_select.callback = self.on_class_select
-        self.add_item(self.class_select)
-
-    async def on_period_select(self, interaction: discord.Interaction):
-        self.period = interaction.data["values"][0]
-        for option in self.period_select.options:
-            option.default = option.value == self.period
-        await interaction.response.edit_message(view=self)
-
-    async def on_class_select(self, interaction: discord.Interaction):
-        value = interaction.data["values"][0]
-        self.class_name = value if value != "all_classes" else None
-        for option in self.class_select.options:
-            option.default = option.value == value
-        await interaction.response.edit_message(view=self)
-
-    @ui.button(
-        label="結果を表示",
-        style=discord.ButtonStyle.success,
-        custom_id="stats_opt_submit",
-    )
-    async def submit(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        season_start_date = (
-            await get_guild_season_start_date(interaction.guild_id)
-            if interaction.guild_id
-            else None
-        )
-        stats_file = await asyncio.to_thread(
-            generate_stats_summary_image,
-            interaction.user.id,
-            self.period,
-            self.class_name,
-            season_start_date,
-        )
-        if stats_file is not None:
-            await self.cog._send_result_embed_from_interaction(
-                interaction,
-                None,
-                force_public=True,
-                file=stats_file,
-            )
-        else:
-            # 画像生成に失敗した場合は従来のEmbed表示へフォールバック
-            embed = await asyncio.to_thread(
-                get_stats_summary,
-                interaction.user.id,
-                self.period,
-                self.class_name,
-                season_start_date,
-            )
-            await self.cog._send_result_embed_from_interaction(
-                interaction, embed, force_public=True
-            )
-        await self.original_interaction.edit_original_response(
-            content="結果を表示しました。", view=None
-        )
-        self.stop()
 
 
 class DeleteHistoryView(ui.View):
