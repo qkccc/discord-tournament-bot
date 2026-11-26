@@ -50,6 +50,12 @@ async def async_init_database():
             PRIMARY KEY (user_id, class_name, archetype)
         )
     """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS sv_user_grandmaster (
+            user_id INTEGER PRIMARY KEY,
+            achieved_at TEXT NOT NULL
+        )
+    """)
 
 
 async def set_user_channel_setting(user_id: int, channel_id: int):
@@ -102,6 +108,21 @@ async def get_effective_season_start_date(guild_id: int | None) -> str | None:
         "ORDER BY rowid LIMIT 1"
     )
     return row["season_start_date"] if row and row["season_start_date"] else None
+
+
+async def set_user_grandmaster_at(user_id: int, achieved_at: str):
+    """achieved_at は JST aware datetime の isoformat() 文字列。"""
+    await db.execute(
+        "INSERT OR REPLACE INTO sv_user_grandmaster (user_id, achieved_at) VALUES (?, ?)",
+        (user_id, achieved_at),
+    )
+
+
+async def get_user_grandmaster_at(user_id: int) -> str | None:
+    row = await db.fetchone(
+        "SELECT achieved_at FROM sv_user_grandmaster WHERE user_id = ?", (user_id,)
+    )
+    return row["achieved_at"] if row else None
 
 
 async def save_user_class_archetype(user_id: int, class_name: str, archetype: str):

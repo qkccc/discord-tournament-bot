@@ -22,6 +22,8 @@ CLASS_ORDER = [
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
 DAY_BOUNDARY_HOUR = 5
+# 「今期」の開始境界だけは17時区切り（他の期間は上記DAY_BOUNDARY_HOURの5時区切り）
+SEASON_START_HOUR = 17
 
 # ローリング期間ウィンドウ（key -> 「今日を含めて何日さかのぼるか」。all は None）
 # ※ "today" は個人特定が容易なため出力しない。"今環境(season)" は build_payload で
@@ -86,6 +88,13 @@ def business_date(dt: datetime.datetime) -> datetime.date:
 def _business_start(d: datetime.date) -> datetime.datetime:
     return datetime.datetime.combine(
         d, datetime.time(DAY_BOUNDARY_HOUR, 0, tzinfo=JST)
+    )
+
+
+def _season_business_start(d: datetime.date) -> datetime.datetime:
+    """「今期」の開始境界（設定日のSEASON_START_HOUR時）を返す。"""
+    return datetime.datetime.combine(
+        d, datetime.time(SEASON_START_HOUR, 0, tzinfo=JST)
     )
 
 
@@ -325,7 +334,7 @@ def build_payload(
     season_is_default = season_start is None
     if season_start is None:
         season_start = resolve_default_season_start(today_bd)
-    season_start_dt = _business_start(season_start)
+    season_start_dt = _season_business_start(season_start)
 
     # (key, start) のリスト。start=None は全期間。
     s3, _ = window_range("3d", now)

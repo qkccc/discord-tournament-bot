@@ -393,16 +393,30 @@ class VoiceLoggerCog(commands.Cog):
 
     @commands.command(name='サブ垢登録')
     @commands.has_permissions(administrator=True)
-    async def register_sub_account(self, ctx, main_id: int, sub_id: int):
-        await db.execute("INSERT OR REPLACE INTO user_sub_accounts (main_user_id, sub_user_id) VALUES (?, ?)", (main_id, sub_id))
-        await ctx.send(embed=discord.Embed(title="✅ 登録完了", description=f"メイン: `{main_id}`\nサブ: `{sub_id}`", color=0x2ECC71))
+    async def register_sub_account(self, ctx, main_user: discord.Member, sub_user: discord.Member):
+        await db.execute("INSERT OR REPLACE INTO user_sub_accounts (main_user_id, sub_user_id) VALUES (?, ?)", (main_user.id, sub_user.id))
+        await ctx.send(embed=discord.Embed(title="✅ 登録完了", description=f"メイン: {main_user.mention}\nサブ: {sub_user.mention}", color=0x2ECC71))
+
+    @register_sub_account.error
+    async def register_sub_account_error(self, ctx, error):
+        if isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
+            await ctx.send("❌ `!サブ垢登録 @メイン垢 @サブ垢` の形式で、メンションまたはIDを2つ指定してください。")
+        else:
+            raise error
 
     @commands.command(name='サブ垢削除')
     @commands.has_permissions(administrator=True)
-    async def remove_sub_account(self, ctx, sub_id: int):
-        cursor = await db.execute("DELETE FROM user_sub_accounts WHERE sub_user_id = ?", (sub_id,))
+    async def remove_sub_account(self, ctx, sub_user: discord.Member):
+        cursor = await db.execute("DELETE FROM user_sub_accounts WHERE sub_user_id = ?", (sub_user.id,))
         msg = "解除しました" if cursor.rowcount > 0 else "登録されていませんでした"
         await ctx.send(f"✅ {msg}")
+
+    @remove_sub_account.error
+    async def remove_sub_account_error(self, ctx, error):
+        if isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
+            await ctx.send("❌ `!サブ垢削除 @サブ垢` の形式で、メンションまたはIDを指定してください。")
+        else:
+            raise error
 
     @commands.command(name='サブ垢一覧')
     async def list_sub_accounts(self, ctx):

@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 
 from .sv_constants import DB_FILE, CLASS_NAMES, CLASS_EMOJI_MAP, RESULTS, TURN_ORDERS
 from .sv_db import get_records_as_df
-from .sv_stats_agg import resolve_default_season_start
+from .sv_stats_agg import resolve_default_season_start, SEASON_START_HOUR
 from cogs.utils.image_style import (
     _load_font,
     _text_bbox,
@@ -113,6 +113,7 @@ def _build_stats_context(
     period: str = "all",
     class_name: str | None = None,
     season_start_date: str | None = None,
+    grandmaster_at: str | None = None,
 ) -> tuple[pd.DataFrame | None, str, str, str | None]:
     user_df = get_records_as_df(user_id)
     class_text = f"{class_name}の" if class_name else ""
@@ -133,6 +134,7 @@ def _build_stats_context(
     }
 
     resolved_season_start_date: datetime.date | None = None
+    resolved_grandmaster_at: datetime.datetime | None = None
     if period == "season":
         if season_start_date:
             try:
@@ -146,6 +148,27 @@ def _build_stats_context(
                 today_business_date
             )
         period_text = f"今期({resolved_season_start_date.month}/{resolved_season_start_date.day}~)の"
+    elif period == "grandmaster":
+        if grandmaster_at:
+            try:
+                resolved_grandmaster_at = datetime.datetime.fromisoformat(
+                    grandmaster_at
+                )
+                if resolved_grandmaster_at.tzinfo is None:
+                    resolved_grandmaster_at = resolved_grandmaster_at.replace(
+                        tzinfo=JST
+                    )
+                else:
+                    resolved_grandmaster_at = resolved_grandmaster_at.astimezone(JST)
+            except ValueError:
+                resolved_grandmaster_at = None
+        if resolved_grandmaster_at is not None:
+            period_text = (
+                f"グラマス後({resolved_grandmaster_at.month}/{resolved_grandmaster_at.day} "
+                f"{resolved_grandmaster_at.hour:02d}:{resolved_grandmaster_at.minute:02d}~)の"
+            )
+        else:
+            period_text = "グラマス後の"
     else:
         period_text = period_text_map.get(period, "あなたの")
 
@@ -201,14 +224,29 @@ def _build_stats_context(
             start_base = resolved_season_start_date or resolve_default_season_start(
                 today_business_date
             )
-            start_time, end_time = to_business_range(
-                start_base,
-                today_business_date + datetime.timedelta(days=1),
+            # 「今期」の開始境界だけはSEASON_START_HOUR時区切り（他の期間は5時区切りのまま）
+            start_time = datetime.datetime.combine(
+                start_base, datetime.time(SEASON_START_HOUR, 0, tzinfo=JST)
             )
+            end_time = to_business_start(today_business_date + datetime.timedelta(days=1))
             user_df = user_df[
                 (user_df["match_time"] >= start_time)
                 & (user_df["match_time"] < end_time)
             ]
+        elif period == "grandmaster":
+            if resolved_grandmaster_at is None:
+                # 未登録。該当データなし扱いにして、下の専用メッセージで案内する
+                user_df = user_df.iloc[0:0]
+            else:
+                user_df = user_df[user_df["match_time"] >= resolved_grandmaster_at]
+
+    if period == "grandmaster" and resolved_grandmaster_at is None:
+        return (
+            None,
+            period_text,
+            class_text,
+            "グラマス達成日時が未登録です。`/grandmaster` で登録してください。",
+        )
 
     if user_df.empty:
         return None, period_text, class_text, f"{period_text}戦績データはありません。"
@@ -231,6 +269,7 @@ def get_deletable_match_times(
     period: str = "all",
     class_name: str | None = None,
     season_start_date: str | None = None,
+    grandmaster_at: str | None = None,
 ) -> tuple[list[str], str, str]:
     """指定した期間・クラスに合致する戦績の match_time 一覧（sv_matches の主キー）を返す。
 
@@ -238,7 +277,7 @@ def get_deletable_match_times(
     「表示される範囲」と「削除される範囲」が食い違わないようにしている。
     """
     df, period_text, class_text, _ = _build_stats_context(
-        user_id, period, class_name, season_start_date
+        user_id, period, class_name, season_start_date, grandmaster_at
     )
     if df is None:
         return [], period_text, class_text
@@ -577,9 +616,10 @@ def generate_stats_summary_image(
     period: str = "all",
     class_name: str | None = None,
     season_start_date: str | None = None,
+    grandmaster_at: str | None = None,
 ) -> discord.File | None:
     user_df, period_text, class_text, empty_reason = _build_stats_context(
-        user_id, period, class_name, season_start_date
+        user_id, period, class_name, season_start_date, grandmaster_at
     )
     if user_df is None:
         return None
@@ -807,9 +847,10 @@ def get_stats_summary(
     period: str = "all",
     class_name: str | None = None,
     season_start_date: str | None = None,
+    grandmaster_at: str | None = None,
 ) -> discord.Embed:
     user_df, period_text, class_text, empty_reason = _build_stats_context(
-        user_id, period, class_name, season_start_date
+        user_id, period, class_name, season_start_date, grandmaster_at
     )
     if user_df is None:
         return discord.Embed(

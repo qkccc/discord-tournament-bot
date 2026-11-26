@@ -17,6 +17,8 @@ from .sv_db import (
     set_guild_season_start_date,
     delete_all_user_records,
     delete_user_records_by_match_times,
+    get_user_grandmaster_at,
+    set_user_grandmaster_at,
 )
 from .sv_utils import (
     extract_text_from_image,
@@ -28,6 +30,8 @@ from .sv_utils import (
 )
 from .ocr_manager import OCRManager
 from .sv_ui import ManualRecordView, DeleteHistoryView
+
+JST = datetime.timezone(datetime.timedelta(hours=9))
 
 
 class ShadowverseCog(commands.Cog):
@@ -284,6 +288,7 @@ class ShadowverseCog(commands.Cog):
             app_commands.Choice(name="3日間", value="3days"),
             app_commands.Choice(name="一週間", value="week"),
             app_commands.Choice(name="今期(設定日~)", value="season"),
+            app_commands.Choice(name="グラマス後", value="grandmaster"),
             app_commands.Choice(name="全期間", value="all"),
         ],
         class_name=[app_commands.Choice(name=cn, value=cn) for cn in CLASS_NAMES],
@@ -300,12 +305,14 @@ class ShadowverseCog(commands.Cog):
         selected_period = period.value if period else "today"
         selected_class = class_name.value if class_name else None
         season_start_date = await get_effective_season_start_date(interaction.guild_id)
+        grandmaster_at = await get_user_grandmaster_at(interaction.user.id)
         stats_file = await asyncio.to_thread(
             generate_stats_summary_image,
             interaction.user.id,
             selected_period,
             selected_class,
             season_start_date,
+            grandmaster_at,
         )
         if stats_file is not None:
             await self._send_result_embed_from_interaction(
@@ -323,6 +330,7 @@ class ShadowverseCog(commands.Cog):
             selected_period,
             selected_class,
             season_start_date,
+            grandmaster_at,
         )
         await self._send_result_embed_from_interaction(
             interaction, embed, force_public=True
@@ -413,6 +421,58 @@ class ShadowverseCog(commands.Cog):
         )
 
     @app_commands.command(
+        name="grandmaster",
+        description="自分がグラマスになった日時を登録・確認します（戦績の「グラマス後」集計で使用）。",
+    )
+    @app_commands.describe(
+        datetime_str="グラマスになった日時 (YYYY-MM-DD HH:MM、省略時は確認のみ)"
+    )
+    async def grandmaster_slash(
+        self, interaction: discord.Interaction, datetime_str: str | None = None
+    ):
+        if datetime_str is None:
+            current = await get_user_grandmaster_at(interaction.user.id)
+            if current:
+                try:
+                    dt = datetime.datetime.fromisoformat(current)
+                except ValueError:
+                    dt = None
+                if dt is not None:
+                    await interaction.response.send_message(
+                        f"現在登録されているグラマス達成日時は **{dt.strftime('%Y-%m-%d %H:%M')}** です。",
+                        ephemeral=True,
+                    )
+                    return
+            await interaction.response.send_message(
+                "グラマス達成日時は未登録です。"
+                "`/grandmaster datetime_str:2026-11-02 17:30` のように登録してください。",
+                ephemeral=True,
+            )
+            return
+
+        parsed_dt: datetime.datetime | None = None
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                parsed_dt = datetime.datetime.strptime(datetime_str.strip(), fmt)
+                break
+            except ValueError:
+                continue
+        if parsed_dt is None:
+            await interaction.response.send_message(
+                "日時形式が不正です。`YYYY-MM-DD HH:MM` で入力してください（例: `2026-11-02 17:30`）。",
+                ephemeral=True,
+            )
+            return
+
+        parsed_dt = parsed_dt.replace(tzinfo=JST)
+        await set_user_grandmaster_at(interaction.user.id, parsed_dt.isoformat())
+        await interaction.response.send_message(
+            f"✅ グラマス達成日時を **{parsed_dt.strftime('%Y-%m-%d %H:%M')}** に登録しました。\n"
+            "以降 `/stats` や `/deletestats` の期間で「グラマス後」が選べます。",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
         name="history", description="直近の戦績を指定した件数表示します。"
     )
     @app_commands.describe(count="表示件数 (1-25)")
@@ -450,6 +510,7 @@ class ShadowverseCog(commands.Cog):
             app_commands.Choice(name="3日間", value="3days"),
             app_commands.Choice(name="一週間", value="week"),
             app_commands.Choice(name="今期(設定日~)", value="season"),
+            app_commands.Choice(name="グラマス後", value="grandmaster"),
             app_commands.Choice(name="全期間", value="all"),
         ],
         class_name=[app_commands.Choice(name=cn, value=cn) for cn in CLASS_NAMES],
@@ -465,12 +526,14 @@ class ShadowverseCog(commands.Cog):
         is_full_delete = selected_period == "all" and selected_class is None
 
         season_start_date = await get_effective_season_start_date(interaction.guild_id)
+        grandmaster_at = await get_user_grandmaster_at(interaction.user.id)
         match_times, period_text, class_text = await asyncio.to_thread(
             get_deletable_match_times,
             interaction.user.id,
             selected_period,
             selected_class,
             season_start_date,
+            grandmaster_at,
         )
         count = len(match_times)
         scope_text = f"{period_text}{class_text}"

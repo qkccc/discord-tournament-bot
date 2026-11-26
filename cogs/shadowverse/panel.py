@@ -83,19 +83,24 @@ try:
         get_stats_summary,
         get_recent_matches,
     )
-    from .sv_db import get_effective_season_start_date
+    from .sv_db import get_effective_season_start_date, get_user_grandmaster_at
 except ImportError:
 
     class ManualRecordView(ui.View):
         pass
 
-    def get_stats_summary(user_id, period, class_name=None, season_start_date=None):
+    def get_stats_summary(
+        user_id, period, class_name=None, season_start_date=None, grandmaster_at=None
+    ):
         return discord.Embed(title="Error")
 
     def get_recent_matches(user_id, count):
         return (discord.Embed(title="Error"), [])
 
     async def get_effective_season_start_date(guild_id):
+        return None
+
+    async def get_user_grandmaster_at(user_id):
         return None
 
 
@@ -117,6 +122,7 @@ class StatsPeriodSelectView(ui.View):
             discord.SelectOption(label="3日間", value="3days"),
             discord.SelectOption(label="一週間", value="week"),
             discord.SelectOption(label="今期(設定日~)", value="season"),
+            discord.SelectOption(label="グラマス後", value="grandmaster"),
             discord.SelectOption(label="全期間", value="all"),
         ],
     )
@@ -126,12 +132,14 @@ class StatsPeriodSelectView(ui.View):
             content="統計を生成しています...", view=None
         )
         season_start_date = await get_effective_season_start_date(interaction.guild_id)
+        grandmaster_at = await get_user_grandmaster_at(interaction.user.id)
         stats_file = await asyncio.to_thread(
             generate_stats_summary_image,
             interaction.user.id,
             selected_period,
             None,
             season_start_date,
+            grandmaster_at,
         )
         if stats_file is None:
             embed = await asyncio.to_thread(
@@ -140,6 +148,7 @@ class StatsPeriodSelectView(ui.View):
                 selected_period,
                 None,
                 season_start_date,
+                grandmaster_at,
             )
         else:
             embed = None
